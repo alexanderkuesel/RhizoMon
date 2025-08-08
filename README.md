@@ -8,4 +8,5 @@ Named after the MU-TH-UR 6000 AI mainframe on the Nostromo (Alien), this repo co
 
 
 ### LoraWAN
-
+https://docs.arduino.cc/learn/communication/lorawan-101/
+https://docs.arduino.cc/arduino-cloud/hardware/lora/ 
