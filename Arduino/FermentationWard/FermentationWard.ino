@@ -1,6 +1,7 @@
 
-// Plant sense v1.0 
-// Measures UV intensity and temperature. Outputs locally to Display
+// FermentationWard
+// Keeps track of variables relevant to fermentation
+// Ambient Temp, Humidity, UV intensity and Jar Moisture.
 //Alexander Kuesel
 
 #include <SPI.h>
