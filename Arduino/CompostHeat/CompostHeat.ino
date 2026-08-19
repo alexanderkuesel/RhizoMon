@@ -141,10 +141,10 @@ void loop() {
     char faultChar[8];
     char hbChar[16];
 
-    dtostrf(lastTempC, 4, 2, tempCChar);
-    dtostrf(lastTempC * 9.0 / 5.0 + 32.0, 4, 2, tempFChar);
+    snprintf(tempCChar, sizeof(tempCChar), "%.2f", lastTempC);
+    snprintf(tempFChar, sizeof(tempFChar), "%.2f", lastTempC * 9.0 / 5.0 + 32.0);
     strcpy(faultChar, thermocoupleFault ? "1" : "0");
-    ultoa(heartBeat, hbChar, 10);
+    snprintf(hbChar, sizeof(hbChar), "%lu", heartBeat);
 
     if (!thermocoupleFault) {
       client.publish(TEMP_C_topic, tempCChar);
