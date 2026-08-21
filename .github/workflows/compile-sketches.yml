@@ -1,0 +1,96 @@
+name: Compile sketches
+
+# Every sketch here targets real hardware, so a broken build is only
+# discovered on the bench unless CI catches it first. This compiles each
+# sketch against its actual board on every PR.
+
+on:
+  pull_request:
+    paths:
+      - 'Arduino/**'
+      - '.github/workflows/compile-sketches.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Arduino/**'
+      - '.github/workflows/compile-sketches.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # enable-deltas-report calls GET /repos/:owner/:repo/pulls/:number to find
+  # the base of the comparison, which needs the pull-requests scope.
+  pull-requests: read
+
+jobs:
+  compile:
+    name: ${{ matrix.board.sketch }} (${{ matrix.board.name }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      # One broken sketch should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        board:
+          - name: Nano 33 IoT
+            sketch: Arduino/CompostHeat
+            fqbn: arduino:samd:nano_33_iot
+            platform: arduino:samd
+            libraries: |
+              - name: WiFiNINA
+              - name: PubSubClient
+              - name: MAX6675 library
+
+          - name: Nano 33 IoT
+            sketch: Arduino/FermentationWard
+            fqbn: arduino:samd:nano_33_iot
+            platform: arduino:samd
+            libraries: |
+              - name: WiFiNINA
+              - name: PubSubClient
+              - name: DHT sensor library
+              - name: Adafruit Unified Sensor
+              - name: TM1637
+
+          - name: UNO R4 WiFi
+            sketch: Arduino/BaseStation
+            fqbn: arduino:renesas_uno:unor4wifi
+            platform: arduino:renesas_uno
+            libraries: |
+              - name: ArduinoMqttClient
+              - name: ArduinoBLE
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Stub gitignored secrets
+        # Real credentials live in arduino_secrets.h, which is gitignored.
+        # Without a stand-in the build fails on the missing include, so
+        # synthesise one from the checked-in template.
+        run: |
+          set -euo pipefail
+          for example in Arduino/*/arduino_secrets.h.example; do
+            [ -e "$example" ] || continue
+            target="${example%.example}"
+            if [ ! -f "$target" ]; then
+              cp "$example" "$target"
+              echo "stubbed $target"
+            fi
+          done
+
+      - name: Compile
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: ${{ matrix.board.fqbn }}
+          platforms: |
+            - name: ${{ matrix.board.platform }}
+          libraries: ${{ matrix.board.libraries }}
+          sketch-paths: |
+            - ${{ matrix.board.sketch }}
+          # Required by enable-deltas-report, which reads the base branch's
+          # report through the API to diff flash/RAM against.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          enable-deltas-report: true
+          enable-warnings-report: true
+          verbose: true
