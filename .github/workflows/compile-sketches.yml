@@ -18,6 +18,9 @@ on:
 
 permissions:
   contents: read
+  # enable-deltas-report calls GET /repos/:owner/:repo/pulls/:number to find
+  # the base of the comparison, which needs the pull-requests scope.
+  pull-requests: read
 
 jobs:
   compile:
