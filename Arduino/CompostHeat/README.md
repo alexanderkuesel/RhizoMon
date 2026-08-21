@@ -64,15 +64,20 @@ Root topic: `MUTHUR`
 
 | Topic                        | Payload                          | Frequency |
 |-------------------------------|-----------------------------------|-----------|
-| `MUTHUR/NDATA/CMPST/TEMP_C`  | Compost temperature, °C (float)  | 5s        |
-| `MUTHUR/NDATA/CMPST/TEMP_F`  | Compost temperature, °F (float)  | 5s        |
-| `MUTHUR/DIAG/CMPST/FAULT`    | `1` if thermocouple open/disconnected, else `0` | 5s |
+| `MUTHUR/NDATA/CMPST/TEMP_C`  | Compost temperature, °C (float)  | 5 min     |
+| `MUTHUR/NDATA/CMPST/TEMP_F`  | Compost temperature, °F (float)  | 5 min     |
+| `MUTHUR/DIAG/CMPST/FAULT`    | `1` if thermocouple open/disconnected, else `0` | 5 min |
 | `MUTHUR/DIAG/CMPST/STATUS`   | JSON: `{device, rssi, uptime, thermocouple_fault}` | 30s |
-| `MUTHUR/DIAG/CMPST/HB`       | Heartbeat counter                | 5s        |
+| `MUTHUR/DIAG/CMPST/HB`       | Heartbeat counter                | 5 min     |
 
 When a thermocouple fault is detected (open circuit / probe unplugged),
 `TEMP_C`/`TEMP_F` are not published for that cycle, but `FAULT` and `HB`
 still are, so you can alert on a stuck/faulted probe.
+
+The thermocouple is still sampled once per second regardless; the publish
+interval only controls how often the most recent reading is sent. Compost
+temperature moves slowly, so 5 minutes is plenty - raise or lower
+`publishInterval` in `CompostHeat.ino` to change it.
 
 ## Build
 
