@@ -36,7 +36,7 @@ const char HB_topic[]      = "MUTHUR/DIAG/CMPST/HB";
 // ------------------*****---------------------
 
 const unsigned long sensorReadInterval = 1000;   // MAX6675 needs >=250ms between reads
-const unsigned long publishInterval    = 300000; // publish readings every 5 min
+const unsigned long publishInterval    = 60000;  // publish readings every 1 min
 const unsigned long diagInterval       = 30000;  // publish diagnostics every 30s
 
 // Retry pacing. Nothing in this sketch retries in a tight loop: every
