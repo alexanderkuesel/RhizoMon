@@ -16,6 +16,9 @@ on:
       - '.github/workflows/compile-sketches.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   compile:
     name: ${{ matrix.board.sketch }} (${{ matrix.board.name }})
@@ -82,6 +85,9 @@ jobs:
           libraries: ${{ matrix.board.libraries }}
           sketch-paths: |
             - ${{ matrix.board.sketch }}
+          # Required by enable-deltas-report, which reads the base branch's
+          # report through the API to diff flash/RAM against.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           enable-deltas-report: true
           enable-warnings-report: true
           verbose: true
