@@ -1,12 +1,15 @@
 // CompostHeat
 // Monitors compost pile internal temperature via a MAX6675 K-type
-// thermocouple amplifier and publishes readings to the MUTHUR MQTT broker.
+// thermocouple amplifier, shows it on a TM1637 4-digit display and
+// publishes readings to the MUTHUR MQTT broker.
 // Alexander Kuesel
 
 #include <SPI.h>
 #include <WiFiNINA.h>
 #include <PubSubClient.h>
 #include <max6675.h>
+#include <TM1637Display.h>
+#include <math.h>
 #include "arduino_secrets.h"
 
 // ------------------*****---------------------
@@ -19,6 +22,17 @@
 #define MAXSO  7   // SO / DO (MISO)
 
 MAX6675 thermocouple(MAXCLK, MAXCS, MAXSO);
+
+// TM1637 4-digit display. Also bit-banged, and its two lines are the only
+// ones it needs, so D2/D3 keep it clear of both the MAX6675 (D5/D6/D7) and
+// the broken-out hardware SPI pins.
+#define DISPCLK 2  // CLK
+#define DISPDIO 3  // DIO
+
+TM1637Display display(DISPCLK, DISPDIO);
+
+// "----" - shown while there is no valid reading to display.
+const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
 
 // ------------------*****---------------------
 // WiFi setup area
@@ -38,6 +52,7 @@ const char HB_topic[]      = "MUTHUR/DIAG/CMPST/HB";
 const unsigned long sensorReadInterval = 1000;   // MAX6675 needs >=250ms between reads
 const unsigned long publishInterval    = 60000;  // publish readings every 1 min
 const unsigned long diagInterval       = 30000;  // publish diagnostics every 30s
+const unsigned long displayInterval    = 1000;   // refresh the 4-digit display every 1s
 
 // Retry pacing. Nothing in this sketch retries in a tight loop: every
 // reconnect attempt is spaced out so loop() always keeps turning over.
@@ -58,6 +73,7 @@ const unsigned long wifiConnectTimeout = 15000;
 unsigned long previousSensorMillis = 0;
 unsigned long previousPublishMillis = 0;
 unsigned long previousDiagMillis = 0;
+unsigned long previousDisplayMillis = 0;
 unsigned long previousMillisLED = 0;
 unsigned long lastWiFiAttempt = 0;
 unsigned long lastMqttAttempt = 0;
@@ -209,6 +225,12 @@ void setup() {
   pinMode(MAXCS, OUTPUT);
   digitalWrite(MAXCS, HIGH);
 
+  // Dashes until the first reading lands, so a wired-up display is
+  // visibly alive from boot rather than looking dead until the sensor
+  // settles.
+  display.setBrightness(2);
+  display.setSegments(SEG_DASHES);
+
   WiFi.setTimeout(wifiConnectTimeout);
 
   client.setServer(server, 1883);
@@ -250,6 +272,34 @@ void loop() {
       lastTempC = tempC;
     } else {
       Serial.println("Thermocouple fault: open circuit / not connected");
+    }
+  }
+
+  // Local readout. Independent of WiFi and MQTT on purpose: the pile is
+  // out in the garden, and the number should be readable standing over it
+  // whether or not the network or the broker is up.
+  if (currentMillis - previousDisplayMillis >= displayInterval) {
+    previousDisplayMillis = currentMillis;
+
+    if (thermocoupleFault || isnan(lastTempC)) {
+      display.setSegments(SEG_DASHES);
+    } else {
+      // The module has one centre colon instead of per-digit decimal
+      // points, and it sits exactly halfway, so the only split it can
+      // punctuate is XX:XX. Show hundredths and read the colon as the
+      // decimal point: 45.60 C is "45:60". That also lands neatly on the
+      // MAX6675's 0.25 C resolution, so the last two digits are always a
+      // real quarter-degree step rather than invented precision.
+      // Leading zeros are kept - the colon form needs all four digits.
+      int hundredths = (int)lroundf(lastTempC * 100.0f);
+      if (hundredths >= 0 && hundredths <= 9999) {
+        display.showNumberDecEx(hundredths, 0b01000000, true);
+      } else {
+        // Outside 0.00-99.99 C: a below-freezing probe, or an
+        // implausibly hot one. Fall back to whole degrees, which is the
+        // only form here that can show a minus sign.
+        display.showNumberDec((int)lroundf(lastTempC));
+      }
     }
   }
 
