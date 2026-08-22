@@ -1,13 +1,15 @@
 # CompostHeat
 
 Sensor station that monitors compost pile internal temperature using a
-MAX6675 K-type thermocouple amplifier, and publishes readings to the
-MUTHUR MQTT broker over WiFi.
+MAX6675 K-type thermocouple amplifier, shows the reading on a TM1637
+4-digit display at the pile, and publishes it to the MUTHUR MQTT broker
+over WiFi.
 
 ## Hardware
 
 - Arduino Nano 33 IoT
 - MAX6675 module + K-type thermocouple probe
+- TM1637 4-digit 7-segment display module
 
 ## Wiring
 
@@ -25,6 +27,16 @@ digital pins work. This sketch uses:
 Plug the K-type thermocouple probe into the MAX6675 module's screw
 terminal, matching polarity (the module is marked + / -).
 
+The TM1637 display is bit-banged over two lines, so again any digital
+pins work:
+
+| TM1637 pin | Nano 33 IoT pin | Notes                              |
+|------------|-----------------|-------------------------------------|
+| VCC        | 3V3             | Do **not** feed it 5V from VUSB - the Nano 33 IoT's pins are 3.3V and are not 5V tolerant. TM1637 modules run happily at 3.3V, just a little dimmer |
+| GND        | GND             |                                     |
+| CLK        | D2              |                                     |
+| DIO        | D3              |                                     |
+
 The onboard NINA WiFi module is not affected by this wiring: on the Nano
 33 IoT it hangs off `SPI1` with its SS/reset/ack lines on internal pins
 24/27/28, none of which are broken out. The broken-out hardware SPI pins
@@ -37,6 +49,7 @@ Install via the Arduino Library Manager:
 - **WiFiNINA** (Arduino) - WiFi connectivity for the Nano 33 IoT
 - **PubSubClient** (Nick O'Leary) - MQTT client
 - **MAX6675** (Adafruit) - thermocouple amplifier driver
+- **TM1637** (Avishay Orpaz) - 4-digit display driver
 
 ## Configuration
 
@@ -85,7 +98,7 @@ ahead of the signal - raise or lower `publishInterval` in
 1. In the Arduino IDE, select **Board: Arduino Nano 33 IoT**.
 2. Install the libraries listed above.
 3. Create `arduino_secrets.h` as described in Configuration.
-4. Wire the MAX6675 module per the table above.
+4. Wire the MAX6675 and TM1637 modules per the tables above.
 5. Upload `CompostHeat.ino`.
 6. Open the Serial Monitor at 9600 baud to confirm WiFi connects, then
    MQTT connects, then readings start printing.
@@ -94,6 +107,27 @@ On boot the sketch waits up to 5 seconds for a serial monitor to attach
 before carrying on, so you get the startup banner even if you open the
 monitor a moment after reset. It does not wait forever, so the board still
 runs standalone on a battery or wall wart.
+
+## Display
+
+The TM1637 shows the most recent temperature in Celsius, refreshed once a
+second. It is driven straight from the last sensor reading and never
+touches the network, so the number stays live and correct while standing
+over the pile even if WiFi or the broker is down.
+
+| Shown     | Meaning                                                 |
+|-----------|----------------------------------------------------------|
+| `45:60`   | 45.60 C. The module has a single centre colon instead of per-digit decimal points, and it sits exactly halfway across the four digits, so the only decimal split it can punctuate is `XX:XX` - read the colon as the decimal point |
+| `05:75`   | 5.75 C. Leading zeros are kept because the colon form needs all four digits |
+| ` -12`    | -12 C. The colon form has no room for a minus sign, so readings outside 0.00-99.99 C drop to whole degrees |
+| `----`    | No valid reading: thermocouple fault, or the first second after boot before the sensor has been read |
+
+The hundredths are not invented precision: the MAX6675 resolves in exact
+0.25 C steps, so the last two digits only ever read `00`, `25`, `50` or
+`75`.
+
+Brightness is set in `setup()` via `display.setBrightness(2)` on the
+library's 0-7 scale; raise it if the display sits in direct sun.
 
 ## Status LED
 

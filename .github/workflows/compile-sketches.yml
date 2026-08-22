@@ -40,6 +40,7 @@ jobs:
               - name: WiFiNINA
               - name: PubSubClient
               - name: MAX6675 library
+              - name: TM1637
 
           - name: Nano 33 IoT
             sketch: Arduino/FermentationWard
