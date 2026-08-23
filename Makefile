@@ -12,7 +12,10 @@ BAUD   ?= 9600
 
 SKETCH_DIR := Arduino/$(SKETCH)
 
-ifeq ($(SKETCH),BaseStation)
+# Sketches targeting the UNO R4 WiFi; everything else is a Nano 33 IoT.
+R4_SKETCHES := BaseStation FlowSenseR4
+
+ifeq ($(filter $(SKETCH),$(R4_SKETCHES)),$(SKETCH))
 FQBN := arduino:renesas_uno:unor4wifi
 else
 FQBN := arduino:samd:nano_33_iot
