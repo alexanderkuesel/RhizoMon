@@ -15,6 +15,9 @@ display behaviour, same topics — but on a board with room to grow. See
 - YF-S201 water flow sensor (1/2" BSP, 1-30 L/min)
 - TM1637 4-digit 7-segment display module
 
+The board's onboard 12x8 LED matrix is used too, and costs no extra parts
+and no header pins — see [LED matrix](#led-matrix).
+
 No level shifter, no divider, no soldering.
 
 ## Wiring
@@ -106,9 +109,9 @@ Install via the Arduino Library Manager:
 - **PubSubClient** (Nick O'Leary) — MQTT client
 - **TM1637** (Avishay Orpaz) — 4-digit display driver
 
-**WiFiS3** is bundled with the UNO R4 board package — do not install it
-separately. The flow sensor needs no library; it is a bare pulse train,
-counted by an interrupt in the sketch.
+**WiFiS3** and **Arduino_LED_Matrix** are both bundled with the UNO R4
+board package — do not install either separately. The flow sensor needs no
+library; it is a bare pulse train, counted by an interrupt in the sketch.
 
 ## Configuration
 
@@ -195,6 +198,67 @@ is only written when its contents change. It is driven straight from the
 sensor and never touches the network, so the numbers stay live while
 standing over the tap even if WiFi or the broker is down.
 
+## LED matrix
+
+The board's onboard 12x8 matrix shows a **rolling sparkline of the last 12
+seconds of flow** — one column per one-second sample window, newest on the
+right, so the trace scrolls leftwards as time passes.
+
+The TM1637 already gives the exact instantaneous rate, so the matrix earns
+its place by showing *shape over time* instead: whether a watering run is
+ramping, holding steady, tapering off or pulsing. A blank matrix means no
+flow.
+
+```
+   ramping up, holding at full, then dropping away
+
+   |.........##.|      column height = flow rate
+   |.........##.|      newest sample --^
+   |........###.|
+   |........###.|
+   |.......####.|
+   |.......#####|
+   |......######|
+   |.....#######|
+```
+
+**Any flow at all lights at least one row.** A trickle that would otherwise
+round to zero is floored to one pixel, because "barely flowing" and
+"stopped" are the one pair the sparkline must never confuse.
+
+### Scale
+
+Vertical scale is fixed, not auto-ranging, so the same height always means
+the same rate and two glances a minute apart are comparable:
+
+```cpp
+const float matrixFullScaleLpm = 30.0f;
+```
+
+The default is the YF-S201's 30 L/min ceiling. **Trim it to your own
+typical flow for more vertical resolution** — against 30, a 7.5 L/min
+garden hose only ever lights two of the eight rows. Setting it to `10.0f`
+would give that same hose six rows.
+
+### Cost
+
+Nothing, in pins or parts. The matrix is charlieplexed across D28-D38,
+which are internal to the board and not broken out to the header, so it
+cannot collide with the flow input or the TM1637. `Arduino_LED_Matrix` is
+bundled with the board package like WiFiS3 — no Library Manager install.
+Pixel work needs nothing else; `ArduinoGraphics` is only required if you
+want *text* on the matrix.
+
+`matrix.begin()` claims one free FSP timer and multiplexes the display
+from a 10 kHz periodic interrupt, lighting one LED per tick (about 104 Hz
+per LED). Nothing else in this sketch wants a timer.
+
+That interrupt does **not** threaten pulse counting: its handler is a
+couple of register writes, external interrupts are latched in the RA4M1's
+ICU so an edge cannot be lost merely by being serviced a few microseconds
+late, and the shortest real gap between pulses is 4.4 ms at the sensor's
+30 L/min ceiling — three orders of magnitude of headroom.
+
 ## Status LED
 
 | Blink pattern | Meaning |
@@ -212,23 +276,57 @@ standing over the tap even if WiFi or the broker is down.
 5. Upload `FlowSenseR4.ino`.
 6. Open the Serial Monitor at 9600 baud.
 
-Or from the repo root, with `arduino-cli` installed:
+### With arduino-cli
+
+From the repo root:
 
 ```sh
-make flash SKETCH=FlowSenseR4        # compile and upload on /dev/ttyACM0
+make deps    SKETCH=FlowSenseR4      # core + libraries, one time
+make compile SKETCH=FlowSenseR4      # build only
+make flash   SKETCH=FlowSenseR4      # build and upload on /dev/ttyACM0
+make flash   SKETCH=FlowSenseR4 PORT=/dev/ttyACM1
 make monitor                          # 9600 baud serial monitor
 ```
 
-The Makefile already knows this sketch targets `arduino:renesas_uno:unor4wifi`.
+The Makefile already knows this sketch targets
+`arduino:renesas_uno:unor4wifi`.
+
+The same by hand:
+
+```sh
+arduino-cli core update-index
+arduino-cli core install arduino:renesas_uno
+arduino-cli lib install "PubSubClient" "TM1637"
+
+cp Arduino/FlowSenseR4/arduino_secrets.h.example Arduino/FlowSenseR4/arduino_secrets.h
+$EDITOR Arduino/FlowSenseR4/arduino_secrets.h
+
+arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi Arduino/FlowSenseR4
+arduino-cli compile --upload --port /dev/ttyACM0 \
+            --fqbn arduino:renesas_uno:unor4wifi Arduino/FlowSenseR4
+arduino-cli monitor --port /dev/ttyACM0 --config baudrate=9600
+```
+
+Only two libraries: **WiFiS3** and **Arduino_LED_Matrix** ship with the
+`arduino:renesas_uno` core, so installing them from the Library Manager is
+unnecessary and can shadow the bundled copies.
+
+See the [root README](../../README.md#building-with-arduino-cli) for the
+full toolchain notes.
 
 ## Why a separate sketch
 
 This could have been `#ifdef`-ed into `Arduino/FlowSense`, but the two
 builds differ in pin map, WiFi stack, pull-up strategy and display supply
 voltage — enough branching to make both harder to read for no gain, and
-this board is meant to grow features the Nano has no room for. The
-measurement core (ISR, pulse math, display logic) is byte-for-byte
-identical between the two, so `diff` is the tool for keeping them in step:
+this board is meant to grow features the Nano has no room for — the
+sparkline above is the first of them.
+
+The measurement core — the ISR, the rate maths and the TM1637 logic — is
+still byte-for-byte identical between the two sketches. The R4 build adds
+to it (one `sparklinePush()` call at the end of the sample window, and the
+matrix helpers) but changes none of it, so `diff` remains the tool for
+keeping the two in step:
 
 ```sh
 diff Arduino/FlowSense/FlowSense.ino Arduino/FlowSenseR4/FlowSenseR4.ino
@@ -248,8 +346,8 @@ order of usefulness for a water meter. None of these are implemented yet.
   running total could survive a power cut. Write it on a volume threshold
   (say every 10 L) rather than on a timer — data flash endurance is finite
   and a 10s write cycle would burn through it.
-- **Built-in 12x8 LED matrix.** `Arduino_LED_Matrix` is bundled. Good for
-  a flow bar-graph or a leak-alert glyph without adding hardware.
+- **More from the LED matrix.** The sparkline uses it already; a
+  leak-alert glyph or a totals view could share it as a second page.
 - **Leak detection.** Continuous non-zero flow for longer than some
   threshold is a burst pipe or a stuck valve. Wants persistent state and a
   retained MQTT alert topic.

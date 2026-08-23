@@ -11,6 +11,10 @@
 #include <WiFiS3.h>
 #include <PubSubClient.h>
 #include <TM1637Display.h>
+// R4: bundled with the board package, like WiFiS3 - not a Library Manager
+// install. Pixel work needs nothing else; ArduinoGraphics is only required
+// if you want text on the matrix.
+#include "Arduino_LED_Matrix.h"
 #include <math.h>
 #include "arduino_secrets.h"
 
@@ -37,6 +41,32 @@ TM1637Display display(DISPCLK, DISPDIO);
 
 // "----" - shown while there is no valid reading to display.
 const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
+
+// ------------------*****---------------------
+// R4: onboard 12x8 LED matrix, showing a rolling sparkline of the last
+// 12 seconds of flow - one column per sample window, newest on the right.
+// The TM1637 already gives the exact instantaneous number, so the matrix
+// earns its place by showing shape over time instead: whether a watering
+// run is ramping, steady, tapering or pulsing.
+//
+// It costs no header pins. The matrix is charlieplexed across D28-D38,
+// which are internal to the board and not broken out, so it cannot
+// collide with the flow input or the display.
+ArduinoLEDMatrix matrix;
+
+const uint8_t matrixCols = 12;
+const uint8_t matrixRows = 8;
+
+// Full-scale deflection: the rate that fills a column to all 8 rows.
+// Defaults to the YF-S201's 30 L/min ceiling. Trim it to your own typical
+// flow for more vertical resolution - against 30, a 7 L/min garden hose
+// only ever lights two rows.
+const float matrixFullScaleLpm = 30.0f;
+
+// Column heights, 0..matrixRows. Index 0 is the oldest sample and
+// matrixCols-1 the newest, so the trace scrolls leftwards as time passes.
+uint8_t sparkline[matrixCols] = {0};
+bool sparklineDirty = true;
 
 // ------------------*****---------------------
 // Sensor calibration area
@@ -277,6 +307,43 @@ float totalLitres() {
   return (float)totalPulses / pulsesPerLitre;
 }
 
+// R4: shift the trace one column left and drop the newest sample in on
+// the right.
+void sparklinePush(float lpm) {
+  for (uint8_t c = 0; c + 1 < matrixCols; c++) {
+    sparkline[c] = sparkline[c + 1];
+  }
+
+  uint8_t height = 0;
+  if (lpm > 0.0f) {
+    long scaled = lroundf((lpm / matrixFullScaleLpm) * (float)matrixRows);
+    // Any flow at all lights one row. Without this a trickle rounds to
+    // zero and reads as "stopped", which is the one thing the sparkline
+    // must never get wrong.
+    if (scaled < 1)                 scaled = 1;
+    if (scaled > (long)matrixRows)  scaled = matrixRows;
+    height = (uint8_t)scaled;
+  }
+  sparkline[matrixCols - 1] = height;
+  sparklineDirty = true;
+}
+
+void sparklineRender() {
+  // Every cell must be exactly 0 or 1: the library ORs each byte into a
+  // bit-packed frame and then shifts, so any other value would bleed into
+  // neighbouring pixels rather than just lighting this one brighter.
+  uint8_t frame[matrixRows][matrixCols] = {{0}};
+
+  for (uint8_t c = 0; c < matrixCols; c++) {
+    // Columns grow upwards from the bottom row.
+    for (uint8_t r = 0; r < sparkline[c]; r++) {
+      frame[matrixRows - 1 - r][c] = 1;
+    }
+  }
+
+  matrix.renderBitmap(frame, matrixRows, matrixCols);
+}
+
 void setup() {
   Serial.begin(9600);
 
@@ -315,6 +382,13 @@ void setup() {
   // visibly alive from boot rather than looking dead for the first second.
   display.setBrightness(2);
   display.setSegments(SEG_DASHES);
+
+  // R4: begin() claims a free FSP timer and multiplexes the matrix from a
+  // 10kHz periodic interrupt. Nothing else in this sketch wants a timer.
+  // The render below just clears it; the trace starts blank because no
+  // flow has been seen yet, which is also what no flow looks like later.
+  matrix.begin();
+  sparklineRender();
 
   WiFi.setTimeout(wifiConnectTimeout);
 
@@ -367,6 +441,7 @@ void loop() {
     flowRateLpm = ((float)deltaPulses * 60000.0f) / (pulsesPerLitre * (float)elapsedMs);
     haveSample = true;
     displayDirty = true;
+    sparklinePush(flowRateLpm);
   }
 
   // Local readout. Independent of WiFi and MQTT on purpose: the meter sits
@@ -419,6 +494,13 @@ void loop() {
         display.showNumberDecEx((int)hundredthsKl, 0b01000000, true);
       }
     }
+  }
+
+  // R4: the sparkline only changes when a sample window closes, so the
+  // repack-and-render happens on that edge rather than on a timer.
+  if (sparklineDirty) {
+    sparklineDirty = false;
+    sparklineRender();
   }
 
   // Publish readings. This block runs whether or not the network is up so
