@@ -58,10 +58,18 @@ const uint8_t matrixCols = 12;
 const uint8_t matrixRows = 8;
 
 // Full-scale deflection: the litres-in-one-hour that fills a column to
-// all 8 rows. 200 L is a decent default for a garden tap - a 10 L/min
-// hose run for twenty minutes. Trim it to your own usage; too high and
-// ordinary days sit flat along the bottom, too low and everything pins.
-const float matrixFullScaleLitres = 200.0f;
+// all 8 rows, so each row is one eighth of this.
+//
+// Sized for roof catchment, not a tap. A roof delivers
+// mm_of_rain * area_m2 * runoff (about 0.85 after losses) litres, so a
+// ~50 m2 roof turns a solid 20 mm/h downpour into roughly 850 L in the
+// hour - four times what a garden hose manages. 800 L puts an ordinary
+// good rain hour near the top of the scale without pinning on every
+// storm. See README > Scale to re-size for a different roof.
+//
+// There is no point setting this above 1800: that is 30 L/min, the
+// YF-S201's own ceiling, so no hour can ever report more.
+const float matrixFullScaleLitres = 800.0f;
 
 // Column heights, 0..matrixRows. Index 0 is the oldest completed hour.
 // The last column is the hour currently being filled, so it grows

@@ -102,6 +102,35 @@ laboratory one. Mount it with a straight run of pipe either side if you
 can; an elbow immediately upstream puts swirl into the flow and the
 turbine reads high.
 
+#### On a rainwater downpipe
+
+Metering roof catchment rather than a tap changes what the sensor is good
+for. Three things to know before trusting the numbers:
+
+- **It saturates in heavy rain.** The turbine tops out at 30 L/min
+  (1800 L/h). On a 50 m² roof that is reached at about **42 mm/h** of
+  rainfall; on 60 m² at 35 mm/h. Costa Rican convective storms exceed
+  that. Above the ceiling the meter under-reads and the excess backs up —
+  and since the meter is itself a restriction in the line, an overwhelmed
+  one will make the collection point overflow. Fit a bypass or overflow
+  above the meter so a storm spills rather than floods, and treat the
+  hours that pin row 8 as "at least this much".
+- **It misses drizzle.** Below roughly 1 L/min the turbine does not turn
+  reliably — about **1.4 mm/h** on a 50 m² roof. Light rain contributes
+  nothing to the total.
+- **Calibrate it in place.** The 450 pulses/litre figure assumes
+  pressurised flow. A gravity feed with only a metre or two of head spins
+  the turbine differently, so the constant will be off until you run the
+  [calibration](#calibration) with the meter mounted where it will live —
+  a bucket under the outlet and a before/after read of `PULSES`.
+
+For context, Heredia averages roughly 2,965 mm a year, so a 50 m² roof at
+0.85 runoff sheds on the order of **126,000 L annually**, with about
+19,000 L in October alone. The lifetime pulse counter wraps at ~9.5
+million litres, so that is decades away — but note the total is still
+*since boot*, so lifetime accounting belongs on the broker, accumulated
+from `HOURLY_L`.
+
 ## Libraries
 
 Install via the Arduino Library Manager:
@@ -269,24 +298,65 @@ Vertical scale is fixed, not auto-ranging, so the same height always means
 the same volume and two glances a day apart are comparable:
 
 ```cpp
-const float matrixFullScaleLitres = 200.0f;
+const float matrixFullScaleLitres = 800.0f;
 ```
 
-200 L is a reasonable default for a garden tap — a 10 L/min hose run for
-twenty minutes. **Trim it to your own usage.** Too high and ordinary days
-sit flat along the bottom; too low and everything pins at eight rows. With
-eight levels the top row means "at least 187.5 L", so a 190 L hour and a
-2000 L hour look the same — the `HOURLY_L` topic is where the real number
-lives.
+Each row is one eighth of that, so with the default:
 
 | Litres in the hour | Rows lit |
 |--------------------|----------|
 | 0                  | 0        |
-| 3                  | 1        |
-| 25                 | 1        |
-| 50                 | 2        |
-| 100                | 4        |
-| 187.5 and above    | 8        |
+| 0 – 150            | 1        |
+| 150 – 250          | 2        |
+| 250 – 350          | 3        |
+| 350 – 450          | 4        |
+| 450 – 550          | 5        |
+| 550 – 650          | 6        |
+| 650 – 750          | 7        |
+| 750 and above      | 8        |
+
+Rows 2-8 are evenly spaced, 100 L apart, each band straddling its centre
+by half a row because the height rounds rather than truncates. **Row 1 is
+deliberately wider** — it covers everything from a trickle to 150 L,
+because any water at all is floored to one row so that "a little" never
+looks like "none".
+
+The top row is open-ended: 800 L and 1500 L are the same eight pixels.
+`HOURLY_L` always carries the real number.
+
+#### Sizing it for a roof
+
+A roof delivers
+
+```
+litres = rainfall_mm x roof_area_m2 x runoff
+```
+
+with runoff about **0.85** for tile or metal after first-flush and wetting
+losses (1 mm of rain on 1 m² is exactly 1 litre). So set full scale to
+whatever a strong-but-not-freak rain hour gives you:
+
+| Roof (plan area) | 20 mm/h downpour | Suggested full scale |
+|------------------|------------------|-----------------------|
+| 20 m²            | 340 L            | 400 L                 |
+| 30 m²            | 510 L            | 500 L                 |
+| **50 m²**        | **850 L**        | **800 L** (the default) |
+| 80 m²            | 1360 L           | 1500 L                |
+| 120 m²           | 2040 L           | 1800 L (sensor-capped) |
+
+**Never set it above 1800.** That is 30 L/min, the YF-S201's own ceiling,
+so no hour can physically report more and the extra rows could never
+light.
+
+The default suits a ~50 m² catchment, where the eight rows span roughly
+0 to 18 mm/h of rainfall.
+
+#### Better: size it from your own data
+
+The sketch publishes `HOURLY_L` from the first hour, so the accurate route
+is to leave it running through a few storms and set full scale near the
+90th-percentile rain hour you actually see. Estimated roof areas and
+runoff coefficients are both rough; measured hours are not.
 
 ### Hours are since boot, not wall-clock
 
