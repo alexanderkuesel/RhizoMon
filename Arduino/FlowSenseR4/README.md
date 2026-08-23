@@ -276,14 +276,43 @@ late, and the shortest real gap between pulses is 4.4 ms at the sensor's
 5. Upload `FlowSenseR4.ino`.
 6. Open the Serial Monitor at 9600 baud.
 
-Or from the repo root, with `arduino-cli` installed:
+### With arduino-cli
+
+From the repo root:
 
 ```sh
-make flash SKETCH=FlowSenseR4        # compile and upload on /dev/ttyACM0
+make deps    SKETCH=FlowSenseR4      # core + libraries, one time
+make compile SKETCH=FlowSenseR4      # build only
+make flash   SKETCH=FlowSenseR4      # build and upload on /dev/ttyACM0
+make flash   SKETCH=FlowSenseR4 PORT=/dev/ttyACM1
 make monitor                          # 9600 baud serial monitor
 ```
 
-The Makefile already knows this sketch targets `arduino:renesas_uno:unor4wifi`.
+The Makefile already knows this sketch targets
+`arduino:renesas_uno:unor4wifi`.
+
+The same by hand:
+
+```sh
+arduino-cli core update-index
+arduino-cli core install arduino:renesas_uno
+arduino-cli lib install "PubSubClient" "TM1637"
+
+cp Arduino/FlowSenseR4/arduino_secrets.h.example Arduino/FlowSenseR4/arduino_secrets.h
+$EDITOR Arduino/FlowSenseR4/arduino_secrets.h
+
+arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi Arduino/FlowSenseR4
+arduino-cli compile --upload --port /dev/ttyACM0 \
+            --fqbn arduino:renesas_uno:unor4wifi Arduino/FlowSenseR4
+arduino-cli monitor --port /dev/ttyACM0 --config baudrate=9600
+```
+
+Only two libraries: **WiFiS3** and **Arduino_LED_Matrix** ship with the
+`arduino:renesas_uno` core, so installing them from the Library Manager is
+unnecessary and can shadow the bundled copies.
+
+See the [root README](../../README.md#building-with-arduino-cli) for the
+full toolchain notes.
 
 ## Why a separate sketch
 
