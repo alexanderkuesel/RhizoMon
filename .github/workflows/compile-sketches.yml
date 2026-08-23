@@ -53,6 +53,15 @@ jobs:
               - name: Adafruit Unified Sensor
               - name: TM1637
 
+          - name: Nano 33 IoT
+            sketch: Arduino/FlowSense
+            fqbn: arduino:samd:nano_33_iot
+            platform: arduino:samd
+            libraries: |
+              - name: WiFiNINA
+              - name: PubSubClient
+              - name: TM1637
+
           - name: UNO R4 WiFi
             sketch: Arduino/BaseStation
             fqbn: arduino:renesas_uno:unor4wifi
