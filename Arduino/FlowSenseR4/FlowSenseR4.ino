@@ -43,11 +43,11 @@ TM1637Display display(DISPCLK, DISPDIO);
 const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
 
 // ------------------*****---------------------
-// R4: onboard 12x8 LED matrix, showing a rolling sparkline of the last
-// 12 seconds of flow - one column per sample window, newest on the right.
-// The TM1637 already gives the exact instantaneous number, so the matrix
-// earns its place by showing shape over time instead: whether a watering
-// run is ramping, steady, tapering or pulsing.
+// R4: onboard 12x8 LED matrix, showing the last 12 hours of water use -
+// one column per hour, height proportional to the litres drawn in that
+// hour, newest on the right. The TM1637 answers "what is flowing right
+// now"; the matrix answers "what has this tap used today", which is the
+// question a garden actually poses.
 //
 // It costs no header pins. The matrix is charlieplexed across D28-D38,
 // which are internal to the board and not broken out, so it cannot
@@ -57,16 +57,17 @@ ArduinoLEDMatrix matrix;
 const uint8_t matrixCols = 12;
 const uint8_t matrixRows = 8;
 
-// Full-scale deflection: the rate that fills a column to all 8 rows.
-// Defaults to the YF-S201's 30 L/min ceiling. Trim it to your own typical
-// flow for more vertical resolution - against 30, a 7 L/min garden hose
-// only ever lights two rows.
-const float matrixFullScaleLpm = 30.0f;
+// Full-scale deflection: the litres-in-one-hour that fills a column to
+// all 8 rows. 200 L is a decent default for a garden tap - a 10 L/min
+// hose run for twenty minutes. Trim it to your own usage; too high and
+// ordinary days sit flat along the bottom, too low and everything pins.
+const float matrixFullScaleLitres = 200.0f;
 
-// Column heights, 0..matrixRows. Index 0 is the oldest sample and
-// matrixCols-1 the newest, so the trace scrolls leftwards as time passes.
-uint8_t sparkline[matrixCols] = {0};
-bool sparklineDirty = true;
+// Column heights, 0..matrixRows. Index 0 is the oldest completed hour.
+// The last column is the hour currently being filled, so it grows
+// through the hour and then shifts left when the hour closes.
+uint8_t hourlyBars[matrixCols] = {0};
+bool matrixDirty = true;
 
 // ------------------*****---------------------
 // Sensor calibration area
@@ -97,6 +98,7 @@ const char* server = "192.168.5.110"; // MQTT server (Raspberry Pi)
 const char RATE_topic[]   = "MUTHUR/NDATA/FLOW/RATE_LPM";
 const char TOTAL_topic[]  = "MUTHUR/NDATA/FLOW/TOTAL_L";
 const char PULSES_topic[] = "MUTHUR/NDATA/FLOW/PULSES";
+const char HOURLY_topic[] = "MUTHUR/NDATA/FLOW/HOURLY_L";
 const char STATUS_topic[] = "MUTHUR/DIAG/FLOW/STATUS";
 const char HB_topic[]     = "MUTHUR/DIAG/FLOW/HB";
 // ------------------*****---------------------
@@ -104,11 +106,11 @@ const char HB_topic[]     = "MUTHUR/DIAG/FLOW/HB";
 const unsigned long sampleInterval  = 1000;   // recompute the flow rate every 1s
 const unsigned long publishInterval = 10000;  // publish readings every 10s
 const unsigned long diagInterval    = 30000;  // publish diagnostics every 30s
-const unsigned long displayInterval = 250;    // display page timer tick
 
-// How long each display page stays up before the other takes over.
-const unsigned long ratePageDuration  = 4000;
-const unsigned long totalPageDuration = 3000;
+// Length of one totalising bucket. These are rolling hours since boot,
+// not wall-clock hours - nothing here is time-synced, so "the last hour"
+// means the last 3600 seconds of uptime.
+const unsigned long hourInterval    = 3600000UL;
 
 // Retry pacing. Nothing in this sketch retries in a tight loop: every
 // reconnect attempt is spaced out so loop() always keeps turning over.
@@ -134,9 +136,14 @@ const uint16_t mqttBufferSize = 512;
 unsigned long previousSampleMillis = 0;
 unsigned long previousPublishMillis = 0;
 unsigned long previousDiagMillis = 0;
-unsigned long previousDisplayMillis = 0;
 unsigned long previousMillisLED = 0;
-unsigned long pageStartMillis = 0;
+
+// Hourly bucket. Litres in the bucket are derived from the pulse counter
+// at its two ends rather than accumulated as floats, for the same reason
+// the lifetime total is: integers do not drift.
+unsigned long hourStartMillis = 0;
+unsigned long hourStartPulses = 0;
+float lastHourLitres = 0.0f;
 unsigned long lastWiFiAttempt = 0;
 unsigned long lastMqttAttempt = 0;
 unsigned long lastRssiPoll = 0;
@@ -172,7 +179,6 @@ unsigned long totalPulses = 0;
 
 float flowRateLpm = 0.0f;
 bool haveSample = false;   // false until the first full sample window closes
-bool showingRate = true;   // which display page is up
 
 // The TM1637 is bit-banged at ~1ms per full four-digit write, and its
 // contents only change when a sample window closes or the page flips.
@@ -307,28 +313,45 @@ float totalLitres() {
   return (float)totalPulses / pulsesPerLitre;
 }
 
-// R4: shift the trace one column left and drop the newest sample in on
-// the right.
-void sparklinePush(float lpm) {
-  for (uint8_t c = 0; c + 1 < matrixCols; c++) {
-    sparkline[c] = sparkline[c + 1];
-  }
-
-  uint8_t height = 0;
-  if (lpm > 0.0f) {
-    long scaled = lroundf((lpm / matrixFullScaleLpm) * (float)matrixRows);
-    // Any flow at all lights one row. Without this a trickle rounds to
-    // zero and reads as "stopped", which is the one thing the sparkline
-    // must never get wrong.
-    if (scaled < 1)                 scaled = 1;
-    if (scaled > (long)matrixRows)  scaled = matrixRows;
-    height = (uint8_t)scaled;
-  }
-  sparkline[matrixCols - 1] = height;
-  sparklineDirty = true;
+// Litres so far in the hour currently being filled.
+float hourLitres() {
+  return (float)(totalPulses - hourStartPulses) / pulsesPerLitre;
 }
 
-void sparklineRender() {
+// R4: litres in an hour -> column height in rows.
+uint8_t matrixBarHeight(float litres) {
+  if (litres <= 0.0f) {
+    return 0;
+  }
+  long scaled = lroundf((litres / matrixFullScaleLitres) * (float)matrixRows);
+  // Any water at all lights one row. Without this an hour with a couple
+  // of litres in it rounds to zero and reads as "nothing happened", which
+  // is the one thing this display must never get wrong.
+  if (scaled < 1)                scaled = 1;
+  if (scaled > (long)matrixRows) scaled = matrixRows;
+  return (uint8_t)scaled;
+}
+
+// R4: refresh the in-progress hour, the rightmost column.
+void matrixSetCurrentHour(float litres) {
+  uint8_t height = matrixBarHeight(litres);
+  if (hourlyBars[matrixCols - 1] != height) {
+    hourlyBars[matrixCols - 1] = height;
+    matrixDirty = true;
+  }
+}
+
+// R4: an hour closed - shift everything left, drop the oldest, and start
+// the new hour empty.
+void matrixRollHour() {
+  for (uint8_t c = 0; c + 1 < matrixCols; c++) {
+    hourlyBars[c] = hourlyBars[c + 1];
+  }
+  hourlyBars[matrixCols - 1] = 0;
+  matrixDirty = true;
+}
+
+void matrixRender() {
   // Every cell must be exactly 0 or 1: the library ORs each byte into a
   // bit-packed frame and then shifts, so any other value would bleed into
   // neighbouring pixels rather than just lighting this one brighter.
@@ -336,7 +359,7 @@ void sparklineRender() {
 
   for (uint8_t c = 0; c < matrixCols; c++) {
     // Columns grow upwards from the bottom row.
-    for (uint8_t r = 0; r < sparkline[c]; r++) {
+    for (uint8_t r = 0; r < hourlyBars[c]; r++) {
       frame[matrixRows - 1 - r][c] = 1;
     }
   }
@@ -385,10 +408,10 @@ void setup() {
 
   // R4: begin() claims a free FSP timer and multiplexes the matrix from a
   // 10kHz periodic interrupt. Nothing else in this sketch wants a timer.
-  // The render below just clears it; the trace starts blank because no
-  // flow has been seen yet, which is also what no flow looks like later.
+  // The render below just clears it; every bucket starts empty because no
+  // water has been seen yet, which is also what an idle hour looks like.
   matrix.begin();
-  sparklineRender();
+  matrixRender();
 
   WiFi.setTimeout(wifiConnectTimeout);
 
@@ -397,7 +420,7 @@ void setup() {
   client.setBufferSize(mqttBufferSize);
 
   previousSampleMillis = millis();
-  pageStartMillis = previousSampleMillis;
+  hourStartMillis = previousSampleMillis;
 
   Serial.println("Setup complete, entering main loop");
 }
@@ -441,66 +464,66 @@ void loop() {
     flowRateLpm = ((float)deltaPulses * 60000.0f) / (pulsesPerLitre * (float)elapsedMs);
     haveSample = true;
     displayDirty = true;
-    sparklinePush(flowRateLpm);
+    matrixSetCurrentHour(hourLitres());
   }
 
   // Local readout. Independent of WiFi and MQTT on purpose: the meter sits
   // out at the tap, and the numbers should be readable standing over it
   // whether or not the network or the broker is up. The two pages take
   // turns; the colon tells them apart (see README > Display).
-  if (currentMillis - previousDisplayMillis >= displayInterval) {
-    previousDisplayMillis = currentMillis;
-
-    unsigned long pageDuration = showingRate ? ratePageDuration : totalPageDuration;
-    if (currentMillis - pageStartMillis >= pageDuration) {
-      pageStartMillis = currentMillis;
-      showingRate = !showingRate;
-      displayDirty = true;
-    }
-  }
-
-  // The 250ms tick above exists to land page flips promptly; the write
-  // itself only happens when there is something new to show.
+  // The readout only changes when a sample window closes, so the write is
+  // gated on that rather than issued on a timer.
   if (displayDirty) {
     displayDirty = false;
 
     if (!haveSample) {
       display.setSegments(SEG_DASHES);
-    } else if (showingRate) {
-      // Rate page: L/min to two decimals, colon read as the decimal point.
-      // The module has one centre colon instead of per-digit decimal
-      // points and it sits exactly halfway, so XX:XX is the only split it
-      // can punctuate. Leading zeros are kept - the colon form needs all
-      // four digits. The YF-S201 tops out at 30 L/min, so 99.99 is only
-      // ever reached by a miswired input counting noise.
-      long hundredths = lroundf(flowRateLpm * 100.0f);
-      if (hundredths < 0)    hundredths = 0;
-      if (hundredths > 9999) hundredths = 9999;
-      display.showNumberDecEx((int)hundredths, 0b01000000, true);
     } else {
-      // Total page: whole litres, no colon, no leading zeros, so it reads
-      // clearly differently from the rate page above.
-      float litres = totalLitres();
-      if (litres <= 9999.0f) {
-        display.showNumberDec((int)lroundf(litres));
-      } else {
-        // Past 9999 L there is no room left for whole litres, so switch
-        // to kilolitres and borrow the colon as the decimal point again:
-        // "12:34" is 12.34 kL. Resolution drops to 10 L, and the display
-        // pins at 99:99 (99,990 L) - by then the MQTT total is the number
-        // to read anyway.
-        long hundredthsKl = lroundf(litres / 10.0f);
-        if (hundredthsKl > 9999) hundredthsKl = 9999;
-        display.showNumberDecEx((int)hundredthsKl, 0b01000000, true);
-      }
+      // Whole litres per minute, right-aligned, no colon.
+      //
+      // The module's only punctuation is a single centre colon, and an
+      // earlier version lit it as a stand-in decimal point ("07:50" for
+      // 7.50 L/min). Nobody reads it that way - it looks like a clock - so
+      // the rate is now shown as a plain whole number instead of being
+      // dressed up with a separator the hardware cannot really provide.
+      // Resolution to the litre is enough here: the matrix and the hourly
+      // MQTT series are what this station trends on, not the instant.
+      long lpm = lroundf(flowRateLpm);
+      if (lpm < 0)    lpm = 0;
+      if (lpm > 9999) lpm = 9999;
+      display.showNumberDec((int)lpm);
     }
   }
 
-  // R4: the sparkline only changes when a sample window closes, so the
-  // repack-and-render happens on that edge rather than on a timer.
-  if (sparklineDirty) {
-    sparklineDirty = false;
-    sparklineRender();
+  // R4: the bars change when the live hour's bar grows or an hour rolls,
+  // so the repack-and-render happens on those edges rather than on a timer.
+  if (matrixDirty) {
+    matrixDirty = false;
+    matrixRender();
+  }
+
+  // Close off an hour and publish it. This is the series to trend on:
+  // one authoritative figure per hour, derived from the pulse counter at
+  // the bucket's two ends so it cannot drift.
+  if (currentMillis - hourStartMillis >= hourInterval) {
+    // Advance by exactly one interval rather than snapping to now, so the
+    // bucket boundaries do not creep later every hour.
+    hourStartMillis += hourInterval;
+    lastHourLitres = hourLitres();
+    hourStartPulses = totalPulses;
+
+    // R4: the hour that just closed becomes a fixed bar and the live
+    // column starts again at zero.
+    matrixRollHour();
+
+    char hourChar[16];
+    snprintf(hourChar, sizeof(hourChar), "%.3f", lastHourLitres);
+    if (mqttUp) {
+      client.publish(HOURLY_topic, hourChar);
+    }
+    Serial.print("Hour closed: ");
+    Serial.print(hourChar);
+    Serial.println(" L");
   }
 
   // Publish readings. This block runs whether or not the network is up so
@@ -548,18 +571,22 @@ void loop() {
   if (currentMillis - previousDiagMillis >= diagInterval) {
     previousDiagMillis = currentMillis;
 
-    char statusMessage[192];
+    char statusMessage[256];
     snprintf(statusMessage, sizeof(statusMessage),
              "{\"device\": \"Arduino UNO R4 WiFi\","
              "\"rssi\": %ld,"
              "\"uptime\": %lu,"
              "\"rate_lpm\": %.2f,"
              "\"total_l\": %.3f,"
+             "\"hour_l\": %.3f,"
+             "\"last_hour_l\": %.3f,"
              "\"pulses\": %lu}",
              cachedRssi,
              currentMillis / 1000,
              flowRateLpm,
              totalLitres(),
+             hourLitres(),
+             lastHourLitres,
              totalPulses);
 
     if (mqttUp) {

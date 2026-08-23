@@ -58,6 +58,7 @@ const char* server = "192.168.5.110"; // MQTT server (Raspberry Pi)
 const char RATE_topic[]   = "MUTHUR/NDATA/FLOW/RATE_LPM";
 const char TOTAL_topic[]  = "MUTHUR/NDATA/FLOW/TOTAL_L";
 const char PULSES_topic[] = "MUTHUR/NDATA/FLOW/PULSES";
+const char HOURLY_topic[] = "MUTHUR/NDATA/FLOW/HOURLY_L";
 const char STATUS_topic[] = "MUTHUR/DIAG/FLOW/STATUS";
 const char HB_topic[]     = "MUTHUR/DIAG/FLOW/HB";
 // ------------------*****---------------------
@@ -65,11 +66,11 @@ const char HB_topic[]     = "MUTHUR/DIAG/FLOW/HB";
 const unsigned long sampleInterval  = 1000;   // recompute the flow rate every 1s
 const unsigned long publishInterval = 10000;  // publish readings every 10s
 const unsigned long diagInterval    = 30000;  // publish diagnostics every 30s
-const unsigned long displayInterval = 250;    // display page timer tick
 
-// How long each display page stays up before the other takes over.
-const unsigned long ratePageDuration  = 4000;
-const unsigned long totalPageDuration = 3000;
+// Length of one totalising bucket. These are rolling hours since boot,
+// not wall-clock hours - nothing here is time-synced, so "the last hour"
+// means the last 3600 seconds of uptime.
+const unsigned long hourInterval    = 3600000UL;
 
 // Retry pacing. Nothing in this sketch retries in a tight loop: every
 // reconnect attempt is spaced out so loop() always keeps turning over.
@@ -87,12 +88,23 @@ const unsigned long serialWaitTimeout  = 5000;
 // is 60s, which makes the board feel dead for a full minute per attempt.
 const unsigned long wifiConnectTimeout = 15000;
 
+// PubSubClient's default buffer is 256 bytes for the whole packet, topic
+// and header included. The diagnostics JSON below is the biggest thing
+// this sketch publishes and it has grown; overflow is silent, so buy the
+// headroom rather than sail close to the limit.
+const uint16_t mqttBufferSize = 512;
+
 unsigned long previousSampleMillis = 0;
 unsigned long previousPublishMillis = 0;
 unsigned long previousDiagMillis = 0;
-unsigned long previousDisplayMillis = 0;
 unsigned long previousMillisLED = 0;
-unsigned long pageStartMillis = 0;
+
+// Hourly bucket. Litres in the bucket are derived from the pulse counter
+// at its two ends rather than accumulated as floats, for the same reason
+// the lifetime total is: integers do not drift.
+unsigned long hourStartMillis = 0;
+unsigned long hourStartPulses = 0;
+float lastHourLitres = 0.0f;
 unsigned long lastWiFiAttempt = 0;
 unsigned long lastMqttAttempt = 0;
 unsigned long lastRssiPoll = 0;
@@ -127,7 +139,6 @@ unsigned long totalPulses = 0;
 
 float flowRateLpm = 0.0f;
 bool haveSample = false;   // false until the first full sample window closes
-bool showingRate = true;   // which display page is up
 
 // The TM1637 is bit-banged at ~1ms per full four-digit write, and its
 // contents only change when a sample window closes or the page flips.
@@ -261,6 +272,11 @@ float totalLitres() {
   return (float)totalPulses / pulsesPerLitre;
 }
 
+// Litres so far in the hour currently being filled.
+float hourLitres() {
+  return (float)(totalPulses - hourStartPulses) / pulsesPerLitre;
+}
+
 void setup() {
   Serial.begin(9600);
 
@@ -300,9 +316,10 @@ void setup() {
 
   client.setServer(server, 1883);
   client.setCallback(callback);
+  client.setBufferSize(mqttBufferSize);
 
   previousSampleMillis = millis();
-  pageStartMillis = previousSampleMillis;
+  hourStartMillis = previousSampleMillis;
 
   Serial.println("Setup complete, entering main loop");
 }
@@ -352,52 +369,48 @@ void loop() {
   // out at the tap, and the numbers should be readable standing over it
   // whether or not the network or the broker is up. The two pages take
   // turns; the colon tells them apart (see README > Display).
-  if (currentMillis - previousDisplayMillis >= displayInterval) {
-    previousDisplayMillis = currentMillis;
-
-    unsigned long pageDuration = showingRate ? ratePageDuration : totalPageDuration;
-    if (currentMillis - pageStartMillis >= pageDuration) {
-      pageStartMillis = currentMillis;
-      showingRate = !showingRate;
-      displayDirty = true;
-    }
-  }
-
-  // The 250ms tick above exists to land page flips promptly; the write
-  // itself only happens when there is something new to show.
+  // The readout only changes when a sample window closes, so the write is
+  // gated on that rather than issued on a timer.
   if (displayDirty) {
     displayDirty = false;
 
     if (!haveSample) {
       display.setSegments(SEG_DASHES);
-    } else if (showingRate) {
-      // Rate page: L/min to two decimals, colon read as the decimal point.
-      // The module has one centre colon instead of per-digit decimal
-      // points and it sits exactly halfway, so XX:XX is the only split it
-      // can punctuate. Leading zeros are kept - the colon form needs all
-      // four digits. The YF-S201 tops out at 30 L/min, so 99.99 is only
-      // ever reached by a miswired input counting noise.
-      long hundredths = lroundf(flowRateLpm * 100.0f);
-      if (hundredths < 0)    hundredths = 0;
-      if (hundredths > 9999) hundredths = 9999;
-      display.showNumberDecEx((int)hundredths, 0b01000000, true);
     } else {
-      // Total page: whole litres, no colon, no leading zeros, so it reads
-      // clearly differently from the rate page above.
-      float litres = totalLitres();
-      if (litres <= 9999.0f) {
-        display.showNumberDec((int)lroundf(litres));
-      } else {
-        // Past 9999 L there is no room left for whole litres, so switch
-        // to kilolitres and borrow the colon as the decimal point again:
-        // "12:34" is 12.34 kL. Resolution drops to 10 L, and the display
-        // pins at 99:99 (99,990 L) - by then the MQTT total is the number
-        // to read anyway.
-        long hundredthsKl = lroundf(litres / 10.0f);
-        if (hundredthsKl > 9999) hundredthsKl = 9999;
-        display.showNumberDecEx((int)hundredthsKl, 0b01000000, true);
-      }
+      // Whole litres per minute, right-aligned, no colon.
+      //
+      // The module's only punctuation is a single centre colon, and an
+      // earlier version lit it as a stand-in decimal point ("07:50" for
+      // 7.50 L/min). Nobody reads it that way - it looks like a clock - so
+      // the rate is now shown as a plain whole number instead of being
+      // dressed up with a separator the hardware cannot really provide.
+      // Resolution to the litre is enough here: the matrix and the hourly
+      // MQTT series are what this station trends on, not the instant.
+      long lpm = lroundf(flowRateLpm);
+      if (lpm < 0)    lpm = 0;
+      if (lpm > 9999) lpm = 9999;
+      display.showNumberDec((int)lpm);
     }
+  }
+
+  // Close off an hour and publish it. This is the series to trend on:
+  // one authoritative figure per hour, derived from the pulse counter at
+  // the bucket's two ends so it cannot drift.
+  if (currentMillis - hourStartMillis >= hourInterval) {
+    // Advance by exactly one interval rather than snapping to now, so the
+    // bucket boundaries do not creep later every hour.
+    hourStartMillis += hourInterval;
+    lastHourLitres = hourLitres();
+    hourStartPulses = totalPulses;
+
+    char hourChar[16];
+    snprintf(hourChar, sizeof(hourChar), "%.3f", lastHourLitres);
+    if (mqttUp) {
+      client.publish(HOURLY_topic, hourChar);
+    }
+    Serial.print("Hour closed: ");
+    Serial.print(hourChar);
+    Serial.println(" L");
   }
 
   // Publish readings. This block runs whether or not the network is up so
@@ -445,18 +458,22 @@ void loop() {
   if (currentMillis - previousDiagMillis >= diagInterval) {
     previousDiagMillis = currentMillis;
 
-    char statusMessage[192];
+    char statusMessage[256];
     snprintf(statusMessage, sizeof(statusMessage),
              "{\"device\": \"Arduino Nano 33 IoT\","
              "\"rssi\": %ld,"
              "\"uptime\": %lu,"
              "\"rate_lpm\": %.2f,"
              "\"total_l\": %.3f,"
+             "\"hour_l\": %.3f,"
+             "\"last_hour_l\": %.3f,"
              "\"pulses\": %lu}",
              cachedRssi,
              currentMillis / 1000,
              flowRateLpm,
              totalLitres(),
+             hourLitres(),
+             lastHourLitres,
              totalPulses);
 
     if (mqttUp) {
