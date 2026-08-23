@@ -220,12 +220,36 @@ serial monitor is attached:
 6. Open the Serial Monitor at 9600 baud to confirm WiFi connects, then
    MQTT connects, then readings start printing.
 
-Or from the repo root, with `arduino-cli` installed:
+### With arduino-cli
+
+From the repo root:
 
 ```sh
-make flash SKETCH=FlowSense          # compile and upload on /dev/ttyACM0
+make deps    SKETCH=FlowSense        # core + libraries, one time
+make compile SKETCH=FlowSense        # build only
+make flash   SKETCH=FlowSense        # build and upload on /dev/ttyACM0
+make flash   SKETCH=FlowSense PORT=/dev/ttyACM1
 make monitor                          # 9600 baud serial monitor
 ```
+
+The same by hand:
+
+```sh
+arduino-cli core update-index
+arduino-cli core install arduino:samd
+arduino-cli lib install "WiFiNINA" "PubSubClient" "TM1637"
+
+cp Arduino/FlowSense/arduino_secrets.h.example Arduino/FlowSense/arduino_secrets.h
+$EDITOR Arduino/FlowSense/arduino_secrets.h
+
+arduino-cli compile --fqbn arduino:samd:nano_33_iot Arduino/FlowSense
+arduino-cli compile --upload --port /dev/ttyACM0 \
+            --fqbn arduino:samd:nano_33_iot Arduino/FlowSense
+arduino-cli monitor --port /dev/ttyACM0 --config baudrate=9600
+```
+
+See the [root README](../../README.md#building-with-arduino-cli) for the
+full toolchain notes.
 
 On boot the sketch waits up to 5 seconds for a serial monitor to attach
 before carrying on, so you get the startup banner even if you open the
