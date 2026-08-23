@@ -154,7 +154,8 @@ Root topic: `MUTHUR`
 | `MUTHUR/NDATA/FLOW/RATE_LPM` | Current flow rate, L/min (float, 2dp) | 10s  |
 | `MUTHUR/NDATA/FLOW/TOTAL_L`  | Cumulative volume since boot, litres (float, 3dp) | 10s |
 | `MUTHUR/NDATA/FLOW/PULSES`   | Cumulative raw pulse count since boot | 10s |
-| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, pulses}` | 30s |
+| `MUTHUR/NDATA/FLOW/HOURLY_L` | Litres drawn in the hour that just closed (float, 3dp) | 1h |
+| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, pulses}` | 30s |
 | `MUTHUR/DIAG/FLOW/HB`        | Heartbeat counter                | 10s       |
 
 `RATE_LPM` is the instantaneous rate over the last one-second sample
@@ -164,6 +165,18 @@ window - the same number the display is showing at that moment - so a
 pulse the interrupt sees, in integer pulses, and converted to litres only
 when it is published, so nothing is lost between publishes and no rounding
 error builds up over a season.
+
+`HOURLY_L` is **the series to trend on**: one figure per hour, published
+the moment that hour closes. Like `TOTAL_L` it is derived from the pulse
+counter at the bucket's two ends rather than accumulated as floats, so it
+cannot drift.
+
+These are rolling hours since boot, not wall-clock hours — nothing here is
+time-synced, so "the last hour" means the last 3600 seconds of uptime. A
+reboot starts a fresh bucket, and the partial hour in progress at that
+moment is lost. The in-progress figure is visible meanwhile as `hour_l` in
+the diagnostics JSON, with the last completed hour alongside it as
+`last_hour_l`.
 
 `PULSES` is published alongside it so the totals can be re-derived against
 a corrected `pulsesPerLitre` after calibration, without re-running the
@@ -175,24 +188,37 @@ reboot shows up as the counter going backwards.
 
 ## Display
 
-The TM1637 alternates between two pages: the flow rate for 4 seconds,
-then the running total for 3. The colon tells them apart - the rate page
-always shows it, the total page (below 9999 L) never does.
+The TM1637 shows one thing: **the current flow rate in whole litres per
+minute**, right-aligned, refreshed once a second when a sample window
+closes.
 
-The page timer ticks every 250ms so a flip lands promptly, but the display
-is only actually written when its contents change - when a sample window
-closes or a page flips - rather than four times a second regardless.
+| Shown  | Meaning |
+|--------|---------|
+| `   8` | 8 L/min |
+| `  12` | 12 L/min |
+| `   0` | No flow |
+| `----` | The first second after boot, before the first sample window closed |
 
-| Shown     | Page  | Meaning                                              |
-|-----------|-------|-------------------------------------------------------|
-| `07:50`   | Rate  | 7.50 L/min. The module has a single centre colon instead of per-digit decimal points, and it sits exactly halfway across the four digits, so `XX:XX` is the only decimal split it can punctuate - read the colon as the decimal point |
-| `00:00`   | Rate  | No flow. Leading zeros are kept because the colon form needs all four digits |
-| ` 342`    | Total | 342 litres since boot. No colon, no leading zeros     |
-| `12:34`   | Total | 12.34 kL = 12,340 L. Past 9999 L there is no room for whole litres, so the total page switches to kilolitres and borrows the colon as the decimal point again. Resolution drops to 10 L and the display pins at `99:99` (99,990 L) - by then read the total off MQTT |
-| `----`    | Both  | The first second after boot, before the first sample window has closed |
+**No colon.** The module's only punctuation is a single centre colon, and
+an earlier version lit it as a stand-in decimal point — `07:50` for
+7.50 L/min. It reads as a clock, not a decimal, so it is gone. The
+hardware cannot place a decimal point where one belongs, so the rate is
+shown as a plain whole number instead of being dressed up with a separator
+that misleads.
+
+Rounding to the litre is deliberate. This station trends on the hourly
+series, not the instant, so a precise instantaneous figure was never what
+the 7-segment was for.
+
+> **The running total is no longer on this display.** The colon was the
+> only thing distinguishing the rate page from the total page; with it
+> gone, `8` alternating with `342` is ambiguous in a way the colon at
+> least was not. Rather than reintroduce a separator, the display now does
+> one job. The total is still on MQTT as `TOTAL_L`, and the hourly series
+> as `HOURLY_L`.
 
 Like the other stations, the display is driven straight from the sensor
-and never touches the network, so the numbers stay live and correct while
+and never touches the network, so the number stays live and correct while
 standing over the tap even if WiFi or the broker is down.
 
 Brightness is set in `setup()` via `display.setBrightness(2)` on the

@@ -162,7 +162,8 @@ replacement and existing dashboards keep working:
 | `MUTHUR/NDATA/FLOW/RATE_LPM` | Current flow rate, L/min (float, 2dp) | 10s  |
 | `MUTHUR/NDATA/FLOW/TOTAL_L`  | Cumulative volume since boot, litres (float, 3dp) | 10s |
 | `MUTHUR/NDATA/FLOW/PULSES`   | Cumulative raw pulse count since boot | 10s |
-| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, pulses}` | 30s |
+| `MUTHUR/NDATA/FLOW/HOURLY_L` | Litres drawn in the hour that just closed (float, 3dp) | 1h |
+| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, pulses}` | 30s |
 | `MUTHUR/DIAG/FLOW/HB`        | Heartbeat counter                | 10s       |
 
 `device` in the status JSON reads `Arduino UNO R4 WiFi`, so you can tell
@@ -176,69 +177,124 @@ volume**: accumulated from every pulse in integer pulses and converted to
 litres only when published, so nothing is lost between publishes and no
 rounding error builds up.
 
+`HOURLY_L` is **the series to trend on**: one figure per hour, published
+the moment that hour closes. Like `TOTAL_L` it is derived from the pulse
+counter at the bucket's two ends rather than accumulated as floats, so it
+cannot drift.
+
+These are rolling hours since boot, not wall-clock hours — nothing here is
+time-synced, so "the last hour" means the last 3600 seconds of uptime. A
+reboot starts a fresh bucket, and the partial hour in progress at that
+moment is lost. The in-progress figure is visible meanwhile as `hour_l` in
+the diagnostics JSON, with the last completed hour alongside it as
+`last_hour_l`.
+
 Both totals are **since boot** — see [Expansion notes](#expansion-notes),
 this is the one the R4 can actually fix.
 
 ## Display
 
-Identical to the Nano build. Two pages alternate: the flow rate for 4
-seconds, then the running total for 3. The colon tells them apart — the
-rate page always shows it, the total page (below 9999 L) never does.
+The TM1637 shows one thing: **the current flow rate in whole litres per
+minute**, right-aligned, refreshed once a second when a sample window
+closes.
 
-| Shown   | Page  | Meaning |
-|---------|-------|---------|
-| `07:50` | Rate  | 7.50 L/min. The module's single centre colon sits exactly halfway across the four digits, so `XX:XX` is the only decimal split it can punctuate — read the colon as the decimal point |
-| `00:00` | Rate  | No flow. Leading zeros are kept because the colon form needs all four digits |
-| ` 342`  | Total | 342 litres since boot. No colon, no leading zeros |
-| `12:34` | Total | 12.34 kL = 12,340 L. Past 9999 L the total page switches to kilolitres and borrows the colon again. Resolution drops to 10 L and it pins at `99:99` (99,990 L) |
-| `----`  | Both  | The first second after boot, before the first sample window closed |
+| Shown  | Meaning |
+|--------|---------|
+| `   8` | 8 L/min |
+| `  12` | 12 L/min |
+| `   0` | No flow |
+| `----` | The first second after boot, before the first sample window closed |
 
-The page timer ticks every 250ms so a flip lands promptly, but the display
-is only written when its contents change. It is driven straight from the
-sensor and never touches the network, so the numbers stay live while
+**No colon.** The module's only punctuation is a single centre colon, and
+an earlier version lit it as a stand-in decimal point — `07:50` for
+7.50 L/min. It reads as a clock, not a decimal, so it is gone. The
+hardware cannot place a decimal point where one belongs, so the rate is
+shown as a plain whole number instead of being dressed up with a separator
+that misleads.
+
+Rounding to the litre is deliberate. This station trends on the hourly
+series, not the instant — and the matrix beside it shows the shape of the
+day — so a precise instantaneous figure was never what the 7-segment was
+for.
+
+> **The running total is no longer on this display.** The colon was the
+> only thing distinguishing the rate page from the total page; with it
+> gone, `8` alternating with `342` is ambiguous in a way the colon at
+> least was not. Rather than reintroduce a separator, the display now does
+> one job. The total is still on MQTT as `TOTAL_L`, the hourly series as
+> `HOURLY_L`, and the last 12 hours on the matrix.
+
+Like the other stations, the display is driven straight from the sensor
+and never touches the network, so the number stays live and correct while
 standing over the tap even if WiFi or the broker is down.
+
+Brightness is set in `setup()` via `display.setBrightness(2)` on the
+library's 0-7 scale; raise it if the display sits in direct sun.
 
 ## LED matrix
 
-The board's onboard 12x8 matrix shows a **rolling sparkline of the last 12
-seconds of flow** — one column per one-second sample window, newest on the
-right, so the trace scrolls leftwards as time passes.
+The board's onboard 12x8 matrix shows **the last 12 hours of water use** —
+one column per hour, height proportional to the litres drawn in that hour,
+newest on the right. The rightmost column is the hour currently being
+filled, so it grows through the hour and then shifts left when the hour
+closes.
 
-The TM1637 already gives the exact instantaneous rate, so the matrix earns
-its place by showing *shape over time* instead: whether a watering run is
-ramping, holding steady, tapering off or pulsing. A blank matrix means no
-flow.
+The TM1637 answers "what is flowing right now". The matrix answers "what
+has this tap used today", which is the question a garden actually poses.
 
 ```
-   ramping up, holding at full, then dropping away
+   a quiet morning, a long watering run, then a short top-up
 
-   |.........##.|      column height = flow rate
-   |.........##.|      newest sample --^
-   |........###.|
-   |........###.|
-   |.......####.|
-   |.......#####|
-   |......######|
-   |.....#######|
+   |....#.....#.|      each column = one hour
+   |....#.....#.|      height      = litres that hour
+   |....#.....#.|      rightmost   = hour in progress
+   |....#.....#.|
+   |....#....##.|
+   |....#....##.|
+   |.#..#....##.|
+   |.#..#..#.##.|
+    020080010480        <- heights, oldest hour on the left
 ```
 
-**Any flow at all lights at least one row.** A trickle that would otherwise
-round to zero is floored to one pixel, because "barely flowing" and
-"stopped" are the one pair the sparkline must never confuse.
+**Any water at all lights at least one row.** An hour with a couple of
+litres in it would otherwise round to zero and read as "nothing happened",
+which is the one thing this display must never get wrong.
+
+An empty matrix means twelve hours with no water — which, on a rain week,
+is correct and not a fault.
 
 ### Scale
 
 Vertical scale is fixed, not auto-ranging, so the same height always means
-the same rate and two glances a minute apart are comparable:
+the same volume and two glances a day apart are comparable:
 
 ```cpp
-const float matrixFullScaleLpm = 30.0f;
+const float matrixFullScaleLitres = 200.0f;
 ```
 
-The default is the YF-S201's 30 L/min ceiling. **Trim it to your own
-typical flow for more vertical resolution** — against 30, a 7.5 L/min
-garden hose only ever lights two of the eight rows. Setting it to `10.0f`
-would give that same hose six rows.
+200 L is a reasonable default for a garden tap — a 10 L/min hose run for
+twenty minutes. **Trim it to your own usage.** Too high and ordinary days
+sit flat along the bottom; too low and everything pins at eight rows. With
+eight levels the top row means "at least 187.5 L", so a 190 L hour and a
+2000 L hour look the same — the `HOURLY_L` topic is where the real number
+lives.
+
+| Litres in the hour | Rows lit |
+|--------------------|----------|
+| 0                  | 0        |
+| 3                  | 1        |
+| 25                 | 1        |
+| 50                 | 2        |
+| 100                | 4        |
+| 187.5 and above    | 8        |
+
+### Hours are since boot, not wall-clock
+
+Nothing here is time-synced, so the buckets are rolling 3600-second
+windows measured from boot. A reboot starts a fresh bucket and loses the
+partial hour in progress. The `RTC` library bundled with the board package
+could align these to real clock hours — see [Expansion
+notes](#expansion-notes).
 
 ### Cost
 
@@ -320,11 +376,12 @@ This could have been `#ifdef`-ed into `Arduino/FlowSense`, but the two
 builds differ in pin map, WiFi stack, pull-up strategy and display supply
 voltage — enough branching to make both harder to read for no gain, and
 this board is meant to grow features the Nano has no room for — the
-sparkline above is the first of them.
+hourly matrix above is the first of them.
 
-The measurement core — the ISR, the rate maths and the TM1637 logic — is
-still byte-for-byte identical between the two sketches. The R4 build adds
-to it (one `sparklinePush()` call at the end of the sample window, and the
+The measurement core — the ISR, the rate maths, the hourly bucket and the
+TM1637 logic — is still byte-for-byte identical between the two sketches.
+The R4 build adds to it (a `matrixSetCurrentHour()` call at the end of the
+sample window, a `matrixRollHour()` call when an hour closes, and the
 matrix helpers) but changes none of it, so `diff` remains the tool for
 keeping the two in step:
 
@@ -345,17 +402,21 @@ order of usefulness for a water meter. None of these are implemented yet.
   (8 KB emulated in the RA4M1's data flash) and `Preferences`, so the
   running total could survive a power cut. Write it on a volume threshold
   (say every 10 L) rather than on a timer — data flash endurance is finite
-  and a 10s write cycle would burn through it.
-- **More from the LED matrix.** The sparkline uses it already; a
-  leak-alert glyph or a totals view could share it as a second page.
+  and a 10s write cycle would burn through it. The 12 hourly bars are worth
+  persisting alongside it, so a reboot does not blank the day's history.
+- **More from the LED matrix.** The hourly bars use it already; a
+  leak-alert glyph or a live-rate view could share it as a second page.
 - **Leak detection.** Continuous non-zero flow for longer than some
   threshold is a burst pipe or a stuck valve. Wants persistent state and a
   retained MQTT alert topic.
 - **A second meter on D3 or D8.** Both are interrupt-capable with no
   channel collision (see the pin table above). Supply and return lines on
   the same station would let you meter actual consumption by difference.
-- **RTC.** Bundled, so readings could carry a wall-clock timestamp
-  instead of an uptime counter — useful for per-day consumption totals.
+- **RTC, to align the hourly buckets.** Bundled. The matrix columns and
+  `HOURLY_L` are currently rolling hours since boot, so "the 9am column"
+  does not exist. Aligning the bucket boundary to the wall clock would
+  make the matrix a real 12-hour-of-day chart and let the broker bucket
+  by calendar day.
 - **Command topics.** The sketch already installs an MQTT `callback()`
   that only logs. Subscribing to a `MUTHUR/DDATA/FLOW/...` topic would let
   the broker reset the total or re-trim `pulsesPerLitre` without a
