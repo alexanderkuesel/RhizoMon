@@ -14,6 +14,7 @@ display behaviour, same topics — but on a board with room to grow. See
 - Arduino UNO R4 WiFi
 - YF-S201 water flow sensor (1/2" BSP, 1-30 L/min)
 - TM1637 4-digit 7-segment display module
+- LM393 soil moisture probe (the same module `FermentationWard` uses)
 
 The board's onboard 12x8 LED matrix is used too, and costs no extra parts
 and no header pins — see [LED matrix](#led-matrix).
@@ -93,6 +94,42 @@ the collision to watch.
 Keep the sensor off the **Qwiic connector** — that is a 3.3V I2C bus and,
 unlike the header pins, it is *not* 5V tolerant.
 
+### Soil moisture probe
+
+The same LM393 module as `FermentationWard`, on the same analog pin so a
+spare can move between stations.
+
+| Module pin | UNO R4 WiFi pin | Notes |
+|------------|-----------------|-------|
+| VCC        | **5V**          | **Not 3.3V.** See below — this differs from the Nano build |
+| GND        | GND             | |
+| AO         | A2              | Analog output; this is the one the sketch reads |
+| DO         | *unconnected*   | A comparator output with a trimmer threshold the sketch has no use for |
+
+**Power it from 5V, not 3.3V.** `FermentationWard` runs its probe at 3.3V
+because the Nano 33 IoT's ADC references 3.3V. The RA4M1's ADC references
+VDD, which is the 5V rail here, so a 3.3V-powered probe would only ever
+swing across two thirds of the range and could never read as properly dry.
+
+`analogRead()` returns 0-1023 on this board — the core's default requested
+read resolution is 10 bits, the same as the Nano — so the raw scale matches
+the other sketch even though the RA4M1's hardware ADC is wider.
+
+A2 is free here: the flow input is on D2 and the display on D4/D7. It is
+interrupt-capable (IRQ7), which analog reading does not need, so if you
+later want a second interrupt source prefer D3 or D8 and leave A2 to the
+probe.
+
+> **Resistive probes corrode.** This module passes DC through two exposed
+> electrodes, so in permanently damp ground it will electrolyse and drift
+> within months — faster in the wet season. Three options, in increasing
+> order of effort: accept it and recalibrate periodically; swap to a
+> **capacitive** soil probe, which is a drop-in replacement electrically
+> and does not corrode; or gate the probe's power so it is only energised
+> during a reading. Gating from a GPIO directly is *not* safe here — the
+> RA4M1's pins are rated 8 mA and the module with its LEDs can draw more —
+> so that route needs a small MOSFET or transistor.
+
 ### Plumbing
 
 The YF-S201 body is marked with a flow-direction arrow — fit it pointing
@@ -133,6 +170,8 @@ const char* server = "192.168.5.110"; // MQTT server (Raspberry Pi)
 
 ## Calibration
 
+### Flow
+
 Identical to the Nano build. The YF-S201's published characteristic is
 `F = 7.5 * Q`, which works out to **450 pulses per litre**:
 
@@ -152,6 +191,41 @@ straight scale factor, so one measured run trims it out:
 Both the rate and the total derive from this one constant, so they stay
 consistent.
 
+### Moisture
+
+The percentage is derived from two endpoints:
+
+```cpp
+const int moistureRawWet = 0;     // reading with the probe in water
+const int moistureRawDry = 1023;  // reading with the probe in dry air
+```
+
+The defaults span the whole ADC range, which is what `FermentationWard`
+assumes, but **a real probe never reaches either end** — expect something
+like 350 submerged and 780 in air. Until you measure them the percentage
+is a rough index, not a calibrated figure: it will never read near 0% or
+100%, and the useful range will be squeezed into the middle.
+
+To trim them, watch `moisture_raw` in the diagnostics JSON:
+
+1. Hold the probe in a glass of water, up to but not past the line marked
+   on the board. Note `moisture_raw` — that is `moistureRawWet`.
+2. Dry it thoroughly and leave it in air. Note `moisture_raw` again —
+   that is `moistureRawDry`.
+3. Put both in `FlowSenseR4.ino` and re-upload.
+
+Do this with the probe at the temperature and in the soil it will live in
+if you can; both affect the reading. And redo it occasionally — see the
+corrosion note under [Soil moisture probe](#soil-moisture-probe).
+
+The mapping is **inverted** on purpose: resistance between the electrodes
+rises as the soil dries, so a high raw reading means dry, and the sketch
+turns that into a low percentage.
+
+Each reading is the mean of 8 consecutive conversions, taken every 10
+seconds. Soil is a slow signal sitting next to a pump; averaging costs
+microseconds and takes out the jitter.
+
 ## MQTT Topics
 
 **Same topics as the Nano 33 IoT build**, so this board is a drop-in
@@ -163,7 +237,8 @@ replacement and existing dashboards keep working:
 | `MUTHUR/NDATA/FLOW/TOTAL_L`  | Cumulative volume since boot, litres (float, 3dp) | 10s |
 | `MUTHUR/NDATA/FLOW/PULSES`   | Cumulative raw pulse count since boot | 10s |
 | `MUTHUR/NDATA/FLOW/HOURLY_L` | Litres drawn in the hour that just closed (float, 3dp) | 1h |
-| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, pulses}` | 30s |
+| `MUTHUR/NDATA/FLOW/MOISTURE_PCT` | Soil moisture, 0-100% (integer) | 10s |
+| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, moisture_pct, moisture_raw, pulses}` | 30s |
 | `MUTHUR/DIAG/FLOW/HB`        | Heartbeat counter                | 10s       |
 
 `device` in the status JSON reads `Arduino UNO R4 WiFi`, so you can tell
@@ -188,6 +263,17 @@ reboot starts a fresh bucket, and the partial hour in progress at that
 moment is lost. The in-progress figure is visible meanwhile as `hour_l` in
 the diagnostics JSON, with the last completed hour alongside it as
 `last_hour_l`.
+
+`MOISTURE_PCT` is **only published once a reading exists**. With no probe
+fitted the pin floats and the sketch reports nothing rather than a
+plausible-looking figure, so an absent topic means "no probe", which is
+not the same as soil that happens to be bone dry. The serial log shows
+`--` in that case.
+
+The diagnostics JSON carries `moisture_raw` alongside the percentage —
+the averaged 0-1023 ADC value the percentage was derived from. That is the
+number to watch while calibrating, and the one to fall back on if you
+distrust the mapping.
 
 Both totals are **since boot** — see [Expansion notes](#expansion-notes),
 this is the one the R4 can actually fix.
@@ -375,15 +461,15 @@ full toolchain notes.
 This could have been `#ifdef`-ed into `Arduino/FlowSense`, but the two
 builds differ in pin map, WiFi stack, pull-up strategy and display supply
 voltage — enough branching to make both harder to read for no gain, and
-this board is meant to grow features the Nano has no room for — the
-hourly matrix above is the first of them.
+this board is meant to grow features the Nano has no room for — the hourly
+matrix and the moisture probe are the first two.
 
 The measurement core — the ISR, the rate maths, the hourly bucket and the
 TM1637 logic — is still byte-for-byte identical between the two sketches.
-The R4 build adds to it (a `matrixSetCurrentHour()` call at the end of the
-sample window, a `matrixRollHour()` call when an hour closes, and the
-matrix helpers) but changes none of it, so `diff` remains the tool for
-keeping the two in step:
+Everything the R4 build has beyond the Nano's is *additive*: the matrix
+helpers with their two call sites, and the moisture probe with its own
+read cadence. None of it changes the shared code, so `diff` remains the
+tool for keeping the two in step:
 
 ```sh
 diff Arduino/FlowSense/FlowSense.ino Arduino/FlowSenseR4/FlowSenseR4.ino
