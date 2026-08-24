@@ -39,6 +39,17 @@
 
 TM1637Display display(DISPCLK, DISPDIO);
 
+// LM393 soil moisture probe, the same module FermentationWard uses, on the
+// same analog pin so a spare can move between stations. Analog only - the
+// module's DO pin and its trimmer set a digital threshold this sketch has
+// no use for, so leave DO unconnected.
+//
+// R4: power it from 5V, NOT the 3.3V FermentationWard uses. The RA4M1's
+// ADC references VDD, which is the 5V rail here, so a 3.3V-powered probe
+// would only ever swing across two thirds of the range and never read as
+// properly dry.
+#define MOISTUREPIN A2
+
 // "----" - shown while there is no valid reading to display.
 const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
 
@@ -85,6 +96,31 @@ const float pulsesPerLitre = 450.0f;
 const unsigned long minPulseIntervalUs = 1000;
 
 // ------------------*****---------------------
+// Moisture calibration area
+// analogRead() returns 0-1023 on this board: the core's default requested
+// read resolution is 10 bits, same as the Nano 33 IoT, so the raw scale
+// matches FermentationWard's even though the hardware ADC is wider.
+//
+// The probe reads HIGH when dry - resistance between the pins rises as the
+// soil dries out - so the mapping is deliberately inverted.
+//
+// These two endpoints are what to trim. The defaults span the whole ADC
+// range, which is what FermentationWard assumes, but a real probe never
+// reaches either end: expect something like 350 submerged and 780 in air.
+// Until they are measured the percentage is a rough index rather than a
+// calibrated figure. See README > Moisture calibration.
+const int moistureRawWet = 0;     // reading with the probe in water
+const int moistureRawDry = 1023;  // reading with the probe in dry air
+
+// Soil moves slowly, and every read is a fresh ADC conversion, so there is
+// nothing to gain from sampling it as often as the flow.
+const unsigned long moistureInterval = 10000;
+
+// The probe sits in wet ground next to a pump; averaging a handful of
+// conversions costs microseconds and takes the jitter out.
+const uint8_t moistureSamples = 8;
+
+// ------------------*****---------------------
 // WiFi setup area
 char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
@@ -99,6 +135,7 @@ const char RATE_topic[]   = "MUTHUR/NDATA/FLOW/RATE_LPM";
 const char TOTAL_topic[]  = "MUTHUR/NDATA/FLOW/TOTAL_L";
 const char PULSES_topic[] = "MUTHUR/NDATA/FLOW/PULSES";
 const char HOURLY_topic[] = "MUTHUR/NDATA/FLOW/HOURLY_L";
+const char MOIST_topic[]  = "MUTHUR/NDATA/FLOW/MOISTURE_PCT";
 const char STATUS_topic[] = "MUTHUR/DIAG/FLOW/STATUS";
 const char HB_topic[]     = "MUTHUR/DIAG/FLOW/HB";
 // ------------------*****---------------------
@@ -178,6 +215,13 @@ unsigned long lastPulseSnapshot = 0;
 unsigned long totalPulses = 0;
 
 float flowRateLpm = 0.0f;
+
+// Moisture. -1 until the first read lands, so a station with no probe
+// fitted reports "unknown" rather than a plausible-looking 0%.
+unsigned long previousMoistureMillis = 0;
+int moistureRaw = -1;
+int moisturePct = -1;
+
 bool haveSample = false;   // false until the first full sample window closes
 
 // The TM1637 is bit-banged at ~1ms per full four-digit write, and its
@@ -313,6 +357,22 @@ float totalLitres() {
   return (float)totalPulses / pulsesPerLitre;
 }
 
+// Average a few conversions and turn the result into a percentage. Returns
+// nothing; it updates moistureRaw/moisturePct so both the calibrated figure
+// and the number you calibrate against are available to publish.
+void readMoisture() {
+  long sum = 0;
+  for (uint8_t i = 0; i < moistureSamples; i++) {
+    sum += analogRead(MOISTUREPIN);
+  }
+  moistureRaw = (int)(sum / moistureSamples);
+
+  long pct = map(moistureRaw, moistureRawWet, moistureRawDry, 100, 0);
+  if (pct < 0)   pct = 0;
+  if (pct > 100) pct = 100;
+  moisturePct = (int)pct;
+}
+
 // Litres so far in the hour currently being filled.
 float hourLitres() {
   return (float)(totalPulses - hourStartPulses) / pulsesPerLitre;
@@ -421,6 +481,8 @@ void setup() {
 
   previousSampleMillis = millis();
   hourStartMillis = previousSampleMillis;
+  previousMoistureMillis = previousSampleMillis;
+  readMoisture();
 
   Serial.println("Setup complete, entering main loop");
 }
@@ -502,6 +564,13 @@ void loop() {
     matrixRender();
   }
 
+  // Sample the soil. Independent of the flow cadence: this is a slow
+  // signal and there is nothing to integrate, so it is simply read.
+  if (currentMillis - previousMoistureMillis >= moistureInterval) {
+    previousMoistureMillis = currentMillis;
+    readMoisture();
+  }
+
   // Close off an hour and publish it. This is the series to trend on:
   // one authoritative figure per hour, derived from the pulse counter at
   // the bucket's two ends so it cannot drift.
@@ -535,11 +604,17 @@ void loop() {
     char rateChar[16];
     char totalChar[16];
     char pulsesChar[16];
+    char moistChar[16];
     char hbChar[16];
 
     snprintf(rateChar, sizeof(rateChar), "%.2f", flowRateLpm);
     snprintf(totalChar, sizeof(totalChar), "%.3f", totalLitres());
     snprintf(pulsesChar, sizeof(pulsesChar), "%lu", totalPulses);
+    if (moisturePct >= 0) {
+      snprintf(moistChar, sizeof(moistChar), "%d", moisturePct);
+    } else {
+      strcpy(moistChar, "--");
+    }
     snprintf(hbChar, sizeof(hbChar), "%lu", heartBeat);
 
     if (mqttUp) {
@@ -548,6 +623,11 @@ void loop() {
       }
       client.publish(TOTAL_topic, totalChar);
       client.publish(PULSES_topic, pulsesChar);
+      // Only publish a figure we actually have. No probe fitted means no
+      // reading, which is different from soil that happens to be bone dry.
+      if (moisturePct >= 0) {
+        client.publish(MOIST_topic, moistChar);
+      }
       client.publish(HB_topic, hbChar);
     }
 
@@ -559,7 +639,9 @@ void loop() {
     Serial.print(totalChar);
     Serial.print(" L (");
     Serial.print(pulsesChar);
-    Serial.print(" pulses) | WiFi ");
+    Serial.print(" pulses) | Moisture: ");
+    Serial.print(moistChar);
+    Serial.print("% | WiFi ");
     Serial.print(wifiUp() ? "up" : "DOWN");
     Serial.print(" | MQTT ");
     Serial.println(mqttUp ? "up" : "DOWN");
@@ -580,6 +662,8 @@ void loop() {
              "\"total_l\": %.3f,"
              "\"hour_l\": %.3f,"
              "\"last_hour_l\": %.3f,"
+             "\"moisture_pct\": %d,"
+             "\"moisture_raw\": %d,"
              "\"pulses\": %lu}",
              cachedRssi,
              currentMillis / 1000,
@@ -587,6 +671,8 @@ void loop() {
              totalLitres(),
              hourLitres(),
              lastHourLitres,
+             moisturePct,
+             moistureRaw,
              totalPulses);
 
     if (mqttUp) {
