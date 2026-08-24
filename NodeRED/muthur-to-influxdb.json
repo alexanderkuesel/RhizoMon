@@ -1,0 +1,169 @@
+[
+  {
+    "id": "muthur_tab",
+    "type": "tab",
+    "label": "MUTHUR -> InfluxDB",
+    "disabled": false,
+    "info": "Bridges the MUTHUR MQTT tree into InfluxDB.\n\nTopic shape: MUTHUR/<class>/<node>/<metric>\nMeasurement = node, field = metric, tags = group/class/node.\n\nSee NodeRED/README.md in the RhizoMon repo."
+  },
+  {
+    "id": "cmt_1",
+    "type": "comment",
+    "z": "muthur_tab",
+    "name": "1. Set the broker + InfluxDB credentials after importing",
+    "info": "Node-RED never exports passwords or tokens. Open the MQTT and InfluxDB config nodes and fill them in.",
+    "x": 260,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "mqtt_in",
+    "type": "mqtt in",
+    "z": "muthur_tab",
+    "name": "MUTHUR/#",
+    "topic": "MUTHUR/#",
+    "qos": "0",
+    "datatype": "utf8",
+    "broker": "muthur_broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 110,
+    "y": 120,
+    "wires": [
+      [
+        "fn_convert"
+      ]
+    ]
+  },
+  {
+    "id": "fn_convert",
+    "type": "function",
+    "z": "muthur_tab",
+    "name": "topic -> Influx point",
+    "func": "// MUTHUR MQTT -> InfluxDB batch points\n//\n// Topic shape:  MUTHUR/<class>/<node>/<metric>\n//   class   NDATA | DDATA | DIAG | PND      -> tag \"class\"\n//   node    FLOW | CMPST | PLNT | BASE ...  -> the Influx measurement\n//   metric  RATE_LPM | TEMP_C | STATUS ...  -> the Influx field name\n//\n// Scalar payloads (\"7.50\") become one field named after the metric.\n// JSON payloads (the STATUS topics) become one field per key.\n\nconst NO_READING = ['--', 'nan', 'NaN', 'null', 'undefined'];\n\nconst parts = String(msg.topic || '').split('/');\nif (parts.length !== 4 || parts[0] !== 'MUTHUR') {\n    node.warn('Ignoring unrecognised topic: ' + msg.topic);\n    return null;\n}\nconst group = parts[0], cls = parts[1], nodeId = parts[2], metric = parts[3];\n\n// The MQTT node may hand us a Buffer or a string depending on its output\n// setting; normalise either way.\nconst raw = (msg.payload === null || msg.payload === undefined)\n    ? '' : String(msg.payload).trim();\n\n// An empty payload is a retained-message clear, not a reading.\nif (raw === '' || NO_READING.indexOf(raw) !== -1) { return null; }\n\nconst fields = {};\nconst tags = { group: group, class: cls, node: nodeId };\n\nfunction addValue(key, value) {\n    key = String(key).toLowerCase();\n\n    if (typeof value === 'boolean') { fields[key] = value; return; }\n\n    if (typeof value === 'number') {\n        // NaN and Infinity are not writable; dropping beats inventing.\n        if (isFinite(value)) { fields[key] = value; }\n        return;\n    }\n\n    if (typeof value !== 'string') { return; }\n\n    const t = value.trim();\n    if (t === '' || NO_READING.indexOf(t) !== -1) { return; }\n    if (t === 'true' || t === 'false') { fields[key] = (t === 'true'); return; }\n\n    // Number() accepts '' and whitespace as 0, which is why the empty\n    // check above comes first.\n    const n = Number(t);\n    if (isFinite(n)) { fields[key] = n; return; }\n\n    // Descriptive text, e.g. device: \"Arduino UNO R4 WiFi\". Tags are\n    // indexed and queryable - keep what lands here low-cardinality.\n    tags[key] = t;\n}\n\nfunction walk(obj, prefix) {\n    Object.keys(obj).forEach(function (k) {\n        const v = obj[k];\n        const key = prefix ? prefix + '_' + k : k;\n        if (v && typeof v === 'object' && !Array.isArray(v)) { walk(v, key); }\n        else { addValue(key, v); }\n    });\n}\n\nlet parsed = null;\nif (raw.charAt(0) === '{') {\n    try {\n        parsed = JSON.parse(raw);\n    } catch (e) {\n        node.warn('Bad JSON on ' + msg.topic + ': ' + e.message);\n        return null;\n    }\n}\n\nif (parsed && typeof parsed === 'object') {\n    walk(parsed, '');\n} else {\n    addValue(metric, raw);\n}\n\n// Nothing usable survived - e.g. a STATUS document whose values were all\n// sentinels. Writing an empty point would be rejected by Influx.\nif (Object.keys(fields).length === 0) { return null; }\n\n// Devices here have no RTC, so the only honest timestamp is ingest time.\nmsg.payload = [{\n    measurement: nodeId,\n    fields: fields,\n    tags: tags,\n    timestamp: new Date()\n}];\nreturn msg;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 330,
+    "y": 120,
+    "wires": [
+      [
+        "influx_batch",
+        "dbg_point"
+      ]
+    ]
+  },
+  {
+    "id": "influx_batch",
+    "type": "influxdb batch",
+    "z": "muthur_tab",
+    "influxdb": "muthur_influx",
+    "precision": "",
+    "retentionPolicy": "",
+    "name": "InfluxDB",
+    "database": "muthur",
+    "precisionV18FluxV20": "ms",
+    "retentionPolicyV18Flux": "",
+    "org": "my-org",
+    "bucket": "muthur",
+    "x": 580,
+    "y": 120,
+    "wires": []
+  },
+  {
+    "id": "dbg_point",
+    "type": "debug",
+    "z": "muthur_tab",
+    "name": "point",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 570,
+    "y": 180,
+    "wires": []
+  },
+  {
+    "id": "catch_all",
+    "type": "catch",
+    "z": "muthur_tab",
+    "name": "write errors",
+    "scope": null,
+    "uncaught": false,
+    "x": 110,
+    "y": 240,
+    "wires": [
+      [
+        "dbg_err"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_err",
+    "type": "debug",
+    "z": "muthur_tab",
+    "name": "influx error",
+    "active": true,
+    "tosidebar": true,
+    "console": true,
+    "tostatus": true,
+    "complete": "error",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 320,
+    "y": 240,
+    "wires": []
+  },
+  {
+    "id": "muthur_broker",
+    "type": "mqtt-broker",
+    "name": "MUTHUR broker",
+    "broker": "192.168.5.110",
+    "port": "1883",
+    "clientid": "node-red-muthur",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": ""
+  },
+  {
+    "id": "muthur_influx",
+    "type": "influxdb",
+    "hostname": "127.0.0.1",
+    "port": "8086",
+    "protocol": "http",
+    "database": "muthur",
+    "name": "MUTHUR InfluxDB",
+    "usetls": false,
+    "tls": "",
+    "influxdbVersion": "2.0",
+    "url": "http://127.0.0.1:8086",
+    "rejectUnauthorized": true
+  }
+]
