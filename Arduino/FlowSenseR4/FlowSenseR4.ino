@@ -15,6 +15,11 @@
 // install. Pixel work needs nothing else; ArduinoGraphics is only required
 // if you want text on the matrix.
 #include "Arduino_LED_Matrix.h"
+// R4: over-the-air sketch upload. This include must come *after* WiFiS3.h -
+// the library picks its network classes by testing for the WiFiS3_h guard,
+// and included first it silently selects the wrong ones. Not bundled with
+// the board package; install "ArduinoOTA" from the Library Manager.
+#include <ArduinoOTA.h>
 #include <math.h>
 #include "arduino_secrets.h"
 
@@ -127,6 +132,17 @@ const unsigned long serialWaitTimeout  = 5000;
 // Cap on how long WiFi.begin() may block internally.
 const unsigned long wifiConnectTimeout = 15000;
 
+// R4: how often to service the OTA listener. ArduinoOTA.poll() costs two
+// round-trips to the ESP32-S3 - a socket check and an mDNS read - so
+// calling it every pass would flood the UART the rest of the sketch
+// depends on. Five times a second is far quicker than the upload tool's
+// timeout and leaves the modem free.
+const unsigned long otaPollInterval = 200;
+
+// The name the board advertises over mDNS, and so how it appears in the
+// IDE's port list.
+const char otaName[] = "FlowSenseR4";
+
 // R4: PubSubClient's default buffer is 256 bytes for the whole packet,
 // topic and header included. The status JSON below fits, but this station
 // is meant to grow - one more field and a silent publish failure is the
@@ -160,6 +176,12 @@ bool linkPolled = false;
 bool wifiAttempted = false;
 bool mqttAttempted = false;
 bool wifiWasUp = false;
+
+// R4: OTA is started once, the first time the link comes up. begin() binds
+// a listening socket and an mDNS socket; re-running it on every reconnect
+// would stack those up.
+bool otaStarted = false;
+unsigned long lastOtaPoll = 0;
 
 // Written by the ISR, read by loop(). Both must be volatile or the
 // compiler is entitled to cache them in a register across the whole loop.
@@ -217,6 +239,18 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println();
 }
 
+// R4: called once the uploaded sketch has been received and verified, just
+// before it is written to flash and the board resets. Stop counting and
+// blank both readouts rather than leaving a frozen number out at the tap
+// for the duration of the write.
+void otaBeforeApply() {
+  detachInterrupt(digitalPinToInterrupt(FLOWPIN));
+  display.setSegments(SEG_DASHES);
+  matrix.clear();
+  Serial.println("OTA: image verified, writing flash and rebooting");
+  Serial.flush();
+}
+
 // ------------------*****---------------------
 // Connectivity. Both helpers return quickly and are safe to call every
 // loop(); neither one ever blocks indefinitely.
@@ -243,6 +277,18 @@ void maintainWiFi() {
       Serial.println("WiFi: connected");
       Serial.print("WiFi: IP address ");
       Serial.println(WiFi.localIP());
+
+      // R4: the listener needs the address, so it can only start once the
+      // link is actually up.
+      if (!otaStarted) {
+        ArduinoOTA.beforeApply(otaBeforeApply);
+        ArduinoOTA.begin(WiFi.localIP(), otaName, SECRET_OTA_PASS, InternalStorage);
+        otaStarted = true;
+        Serial.print("OTA: listening as \"");
+        Serial.print(otaName);
+        Serial.println("\"");
+      }
+
       Serial.println("---------------------------------------");
     }
     return;
@@ -434,6 +480,15 @@ void loop() {
   // One connected() check per pass, reused below for the same reason as
   // the link status above.
   bool mqttUp = maintainMqtt();
+
+  // R4: service the OTA listener. Gated behind its own interval for the
+  // same reason RSSI is - see otaPollInterval. During an actual upload
+  // poll() blocks until the image has been received, which is fine: the
+  // pulse counter is an interrupt and keeps counting underneath it.
+  if (otaStarted && wifiUp() && (currentMillis - lastOtaPoll >= otaPollInterval)) {
+    lastOtaPoll = currentMillis;
+    ArduinoOTA.poll();
+  }
 
   // Cache RSSI rather than calling WiFi.RSSI() inline. Each call is a full
   // round-trip to the radio.

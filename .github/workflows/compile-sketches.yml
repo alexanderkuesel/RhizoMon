@@ -66,11 +66,13 @@ jobs:
             sketch: Arduino/FlowSenseR4
             fqbn: arduino:renesas_uno:unor4wifi
             platform: arduino:renesas_uno
-            # WiFiS3 is bundled with the renesas_uno platform, so it is
-            # not listed here.
+            # WiFiS3 and Arduino_LED_Matrix are bundled with the
+            # renesas_uno platform, so they are not listed here.
+            # ArduinoOTA is not - it comes from the Library Manager.
             libraries: |
               - name: PubSubClient
               - name: TM1637
+              - name: ArduinoOTA
 
           - name: UNO R4 WiFi
             sketch: Arduino/BaseStation
