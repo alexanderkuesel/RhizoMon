@@ -108,6 +108,7 @@ Install via the Arduino Library Manager:
 
 - **PubSubClient** (Nick O'Leary) — MQTT client
 - **TM1637** (Avishay Orpaz) — 4-digit display driver
+- **ArduinoOTA** (Juraj Andrassy) — over-the-air sketch upload
 
 **WiFiS3** and **Arduino_LED_Matrix** are both bundled with the UNO R4
 board package — do not install either separately. The flow sensor needs no
@@ -119,8 +120,9 @@ WiFi credentials are kept out of the sketch and out of git:
 
 1. Copy `arduino_secrets.h.example` to `arduino_secrets.h` in this same
    folder.
-2. Edit `arduino_secrets.h` and fill in your real `SECRET_SSID` and
-   `SECRET_PASS`.
+2. Edit `arduino_secrets.h` and fill in your real `SECRET_SSID`,
+   `SECRET_PASS`, and `SECRET_OTA_PASS` (the over-the-air upload
+   password — see [Over-the-air updates](#over-the-air-updates)).
 
 `arduino_secrets.h` is listed in the repo's `.gitignore`, so it won't be
 committed.
@@ -314,6 +316,69 @@ couple of register writes, external interrupts are latched in the RA4M1's
 ICU so an edge cannot be lost merely by being serviced a few microseconds
 late, and the shortest real gap between pulses is 4.4 ms at the sensor's
 30 L/min ceiling — three orders of magnitude of headroom.
+
+## Over-the-air updates
+
+The station sits at a rainwater downpipe. Reflashing it should not mean
+carrying a laptop out there, so the sketch listens for OTA uploads and
+appears in the IDE's port list as **FlowSenseR4**.
+
+### One-time setup
+
+`ArduinoOTA` is **not** bundled with the board package — install it from
+the Library Manager. Then the step that catches everyone:
+
+> Copy `extras/renesas/platform.local.txt` from the ArduinoOTA library
+> next to `platform.txt` in the renesas boards package — typically
+> `~/.arduino15/packages/arduino/hardware/renesas_uno/<version>/`.
+> Restart the IDE.
+
+Without it the IDE uses the wrong upload command and fails in ways that
+look like a network problem. The file only defines upload tooling, so it
+is not needed to *compile* — which is why CI builds this sketch fine
+without it.
+
+Unlike the RP2040 and ESP cores, the renesas package ships no bundled
+`ArduinoOTA`, so there is nothing to delete first.
+
+### Uploading
+
+Select **FlowSenseR4** from the IDE's network ports and upload as normal.
+The IDE prompts for the password, which is `SECRET_OTA_PASS` from
+`arduino_secrets.h`. **Set a real one** — the OTA port is reachable by
+anything on your network.
+
+If the network port doesn't appear, mDNS discovery on this board is
+occasionally flaky. Uploading by IP address still works, and the serial
+log prints the address on every connect.
+
+### The size ceiling
+
+The sketch binary is limited to **half the available flash**. The library
+computes it as `(MAX_FLASH - SKETCH_START_ADDRESS) / 2`: the incoming
+image is buffered in the upper half of flash before being copied down over
+the running sketch. On the RA4M1's 256 KB that means roughly **128 KB**.
+
+This is the constraint to watch as the sketch grows. `make compile
+SKETCH=FlowSenseR4` reports flash usage, and CI prints it on every PR —
+if it approaches 128 KB, OTA stops being an option before the sketch stops
+fitting on the board.
+
+### What happens during an update
+
+Polling is throttled to five times a second rather than run every loop
+pass. `ArduinoOTA.poll()` costs two round-trips to the ESP32-S3 — a socket
+check and an mDNS read — and this sketch is careful about UART traffic to
+the radio for the same reason it caches `WiFi.status()` and RSSI.
+
+Once an image is received and verified, `otaBeforeApply()` detaches the
+pulse interrupt and blanks both readouts, so nothing shows a frozen number
+while the flash is rewritten. Then the board resets.
+
+**Counts do not survive the update.** Flash rewriting ends in a reset, and
+the totals are since-boot anyway — the lifetime figure lives on the broker,
+accumulated from `HOURLY_L`. Persisting them across reboots is in
+[Expansion notes](#expansion-notes).
 
 ## Status LED
 
