@@ -341,7 +341,7 @@ without it.
 Unlike the RP2040 and ESP cores, the renesas package ships no bundled
 `ArduinoOTA`, so there is nothing to delete first.
 
-### Uploading
+### Uploading from the IDE
 
 Select **FlowSenseR4** from the IDE's network ports and upload as normal.
 The IDE prompts for the password, which is `SECRET_OTA_PASS` from
@@ -351,6 +351,35 @@ anything on your network.
 If the network port doesn't appear, mDNS discovery on this board is
 occasionally flaky. Uploading by IP address still works, and the serial
 log prints the address on every connect.
+
+### Uploading from the command line
+
+From the repo root:
+
+```sh
+make flash-ota SKETCH=FlowSenseR4 OTA_IP=192.168.5.42
+```
+
+The address is whatever the serial log printed on the last connect. The
+password is read out of this folder's gitignored `arduino_secrets.h`, so
+it is never typed on the command line or stored in the Makefile.
+
+The raw commands, if you prefer them:
+
+```sh
+arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi Arduino/FlowSenseR4
+arduino-cli upload --port 192.168.5.42 --protocol network \
+            --fqbn arduino:renesas_uno:unor4wifi \
+            --upload-field password=YourOtaPassword Arduino/FlowSenseR4
+```
+
+Two commands rather than one: `compile --upload` has no `--upload-field`,
+so the password can only be handed to `upload`.
+
+> **The first flash is always over USB.** OTA only works once a sketch
+> that calls `ArduinoOTA` is already running on the board — and if a bad
+> upload ever takes the network down, the cable is how you recover. Keep
+> physical access in mind before deploying a station somewhere awkward.
 
 ### The size ceiling
 
