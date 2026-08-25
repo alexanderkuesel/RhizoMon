@@ -10,10 +10,21 @@
 #   make flash PORT=/dev/ttyACM1
 #   make monitor
 #   make fqbn                               # print what would be built, and with what
+#   make flash-ota SKETCH=FlowSenseR4 OTA_IP=192.168.5.42   # upload over WiFi
 
 SKETCH ?= CompostHeat
 PORT   ?= /dev/ttyACM0
 BAUD   ?= 9600
+
+# Address of the board for an over-the-air upload. No default: there is no
+# sensible guess, and guessing wrong means uploading to someone else's
+# board.
+OTA_IP ?=
+
+# Read the OTA password out of the sketch's own gitignored
+# arduino_secrets.h rather than keeping a second copy here. Assigned with
+# ?= so the file is only read when an OTA target actually runs.
+OTA_PASS ?= $(shell sed -n 's/^[[:space:]]*#define[[:space:]]\{1,\}SECRET_OTA_PASS[[:space:]]\{1,\}"\(.*\)".*/\1/p' $(SKETCH_DIR)/arduino_secrets.h 2>/dev/null)
 
 SKETCH_DIR := Arduino/$(SKETCH)
 
@@ -40,12 +51,12 @@ endif
 LIBS_CompostHeat      := "WiFiNINA" "PubSubClient" "MAX6675 library" "TM1637"
 LIBS_FermentationWard := "WiFiNINA" "PubSubClient" "DHT sensor library" "Adafruit Unified Sensor" "TM1637"
 LIBS_FlowSense        := "WiFiNINA" "PubSubClient" "TM1637"
-LIBS_FlowSenseR4      := "PubSubClient" "TM1637"
+LIBS_FlowSenseR4      := "PubSubClient" "TM1637" "ArduinoOTA"
 LIBS_BaseStation      := "ArduinoMqttClient" "ArduinoBLE"
 
 LIBS := $(LIBS_$(SKETCH))
 
-.PHONY: deps deps-all compile flash monitor list fqbn
+.PHONY: deps deps-all compile flash flash-ota monitor list fqbn
 
 # One-time setup for whichever sketch you are about to build.
 deps:
@@ -70,6 +81,22 @@ compile:
 # an earlier build can never reach the board.
 flash:
 	arduino-cli compile --upload --port $(PORT) --fqbn $(FQBN) $(SKETCH_DIR)
+
+# Upload over WiFi instead of USB. The board must already be running a
+# sketch that calls ArduinoOTA - the very first flash is always over the
+# cable, and so is any recovery if a bad sketch takes the network down.
+#
+# Two commands rather than one: 'compile --upload' has no --upload-field,
+# so the password can only be passed to 'upload'.
+#
+# Note the password lands in this process's command line, so it is visible
+# to 'ps' for the moment the upload runs.
+flash-ota:
+	@test -n "$(OTA_IP)" || { echo "Set OTA_IP, e.g. make flash-ota SKETCH=FlowSenseR4 OTA_IP=192.168.5.42"; exit 1; }
+	@test -n "$(OTA_PASS)" || { echo "No SECRET_OTA_PASS in $(SKETCH_DIR)/arduino_secrets.h"; exit 1; }
+	arduino-cli compile --fqbn $(FQBN) $(SKETCH_DIR)
+	arduino-cli upload --port $(OTA_IP) --protocol network --fqbn $(FQBN) \
+	            --upload-field password=$(OTA_PASS) $(SKETCH_DIR)
 
 monitor:
 	arduino-cli monitor --port $(PORT) --config baudrate=$(BAUD)

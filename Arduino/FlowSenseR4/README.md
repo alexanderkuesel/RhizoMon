@@ -271,24 +271,45 @@ Vertical scale is fixed, not auto-ranging, so the same height always means
 the same volume and two glances a day apart are comparable:
 
 ```cpp
-const float matrixFullScaleLitres = 200.0f;
+const float matrixFullScaleLitres = 100.0f;
 ```
 
-200 L is a reasonable default for a garden tap — a 10 L/min hose run for
-twenty minutes. **Trim it to your own usage.** Too high and ordinary days
-sit flat along the bottom; too low and everything pins at eight rows. With
-eight levels the top row means "at least 187.5 L", so a 190 L hour and a
-2000 L hour look the same — the `HOURLY_L` topic is where the real number
-lives.
+Each row is one eighth of that — **12.5 L**:
 
 | Litres in the hour | Rows lit |
 |--------------------|----------|
 | 0                  | 0        |
-| 3                  | 1        |
-| 25                 | 1        |
-| 50                 | 2        |
-| 100                | 4        |
-| 187.5 and above    | 8        |
+| 0 – 18.75          | 1        |
+| 18.75 – 31.25      | 2        |
+| 31.25 – 43.75      | 3        |
+| 43.75 – 56.25      | 4        |
+| 56.25 – 68.75      | 5        |
+| 68.75 – 81.25      | 6        |
+| 81.25 – 93.75      | 7        |
+| 93.75 and above    | 8        |
+
+Rows 2–8 are evenly spaced, each band straddling its centre by half a row
+because the height rounds rather than truncates. **Row 1 is deliberately
+wider** — it covers everything from a trickle to 18.75 L, because any
+water at all is floored to one row so that "a little" never looks like
+"none".
+
+The top row is open-ended: 100 L and 1000 L are the same eight pixels.
+`HOURLY_L` always carries the real number.
+
+**Trim this to what the station actually collects.** Too high and ordinary
+hours sit flat along the bottom; too low and everything pins at eight rows
+and the trace stops saying anything. The honest way to set it is from your
+own data — leave it running through a few rain events, then put full scale
+near the 90th-percentile hour you actually see in `HOURLY_L`.
+
+For a roof rather than a tap the arithmetic is
+`litres = rainfall_mm × roof_area_m² × runoff` (about 0.85 for tile or
+metal after losses; 1 mm on 1 m² is exactly 1 litre). Note that at 100 L
+full scale a 50 m² roof reaches the top row at roughly **2.2 mm/h** of
+rainfall, so anything beyond light rain will pin it — fine if what you
+want is "collecting / not collecting", worth raising if you want to see
+the shape of a storm.
 
 ### Hours are since boot, not wall-clock
 
@@ -341,7 +362,7 @@ without it.
 Unlike the RP2040 and ESP cores, the renesas package ships no bundled
 `ArduinoOTA`, so there is nothing to delete first.
 
-### Uploading
+### Uploading from the IDE
 
 Select **FlowSenseR4** from the IDE's network ports and upload as normal.
 The IDE prompts for the password, which is `SECRET_OTA_PASS` from
@@ -351,6 +372,35 @@ anything on your network.
 If the network port doesn't appear, mDNS discovery on this board is
 occasionally flaky. Uploading by IP address still works, and the serial
 log prints the address on every connect.
+
+### Uploading from the command line
+
+From the repo root:
+
+```sh
+make flash-ota SKETCH=FlowSenseR4 OTA_IP=192.168.5.42
+```
+
+The address is whatever the serial log printed on the last connect. The
+password is read out of this folder's gitignored `arduino_secrets.h`, so
+it is never typed on the command line or stored in the Makefile.
+
+The raw commands, if you prefer them:
+
+```sh
+arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi Arduino/FlowSenseR4
+arduino-cli upload --port 192.168.5.42 --protocol network \
+            --fqbn arduino:renesas_uno:unor4wifi \
+            --upload-field password=YourOtaPassword Arduino/FlowSenseR4
+```
+
+Two commands rather than one: `compile --upload` has no `--upload-field`,
+so the password can only be handed to `upload`.
+
+> **The first flash is always over USB.** OTA only works once a sketch
+> that calls `ArduinoOTA` is already running on the board — and if a bad
+> upload ever takes the network down, the cable is how you recover. Keep
+> physical access in mind before deploying a station somewhere awkward.
 
 ### The size ceiling
 
