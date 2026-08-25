@@ -63,10 +63,11 @@ const uint8_t matrixCols = 12;
 const uint8_t matrixRows = 8;
 
 // Full-scale deflection: the litres-in-one-hour that fills a column to
-// all 8 rows. 200 L is a decent default for a garden tap - a 10 L/min
-// hose run for twenty minutes. Trim it to your own usage; too high and
-// ordinary days sit flat along the bottom, too low and everything pins.
-const float matrixFullScaleLitres = 200.0f;
+// all 8 rows, so each row is one eighth of this - 12.5 L at the current
+// setting. Trim it to what this station actually collects: too high and
+// ordinary hours sit flat along the bottom, too low and everything pins
+// at eight rows and the trace stops telling you anything.
+const float matrixFullScaleLitres = 100.0f;
 
 // Column heights, 0..matrixRows. Index 0 is the oldest completed hour.
 // The last column is the hour currently being filled, so it grows
