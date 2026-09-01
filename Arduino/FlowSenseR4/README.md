@@ -228,35 +228,48 @@ this is the one the R4 can actually fix.
 
 ## Display
 
-The TM1637 shows one thing: **the current flow rate in whole litres per
-minute**, right-aligned, refreshed once a second when a sample window
-closes.
+The TM1637 rotates through three pages, **five seconds each**, so the full
+cycle is fifteen seconds:
 
-| Shown  | Meaning |
-|--------|---------|
-| `   8` | 8 L/min |
-| `  12` | 12 L/min |
-| `   0` | No flow |
-| `----` | The first second after boot, before the first sample window closed |
+| Page | Shown | Meaning |
+|------|-------|---------|
+| Flow rate | `  8L` | 8 L/min |
+| Temperature | ` 21C` | 21 °C |
+| Humidity | ` 55H` | 55 %RH |
 
-**No colon.** The module's only punctuation is a single centre colon, and
-an earlier version lit it as a stand-in decimal point — `07:50` for
-7.50 L/min. It reads as a clock, not a decimal, so it is gone. The
-hardware cannot place a decimal point where one belongs, so the rate is
-shown as a plain whole number instead of being dressed up with a separator
-that misleads.
+**The rightmost digit is a unit tag, not a value.** This is what makes the
+rotation readable: the module has no decimal point, and its one piece of
+punctuation is a centre colon that reads as a clock rather than a
+separator, so a bare number is the whole of what four digits can say —
+and three pages of bare numbers is exactly the ambiguity that got an
+earlier two-page rotation removed. Spending the last digit on a letter
+buys back the labelling the hardware cannot otherwise do.
 
-Rounding to the litre is deliberate. This station trends on the hourly
-series, not the instant — and the matrix beside it shows the shape of the
-day — so a precise instantaneous figure was never what the 7-segment was
-for.
+That leaves three digits for the value, which is enough for everything
+this station measures — `-40C` to ` 80C` across the DHT22's range, and
+`100H` at saturation. Values are rounded to whole units, and anything
+wider than three digits is clamped rather than wrapped: a display pinned
+at `999L` is visibly pinned, whereas a wrapped number looks like a real
+reading.
 
-> **The running total is no longer on this display.** The colon was the
-> only thing distinguishing the rate page from the total page; with it
-> gone, `8` alternating with `342` is ambiguous in a way the colon at
-> least was not. Rather than reintroduce a separator, the display now does
-> one job. The total is still on MQTT as `TOTAL_L`, the hourly series as
-> `HOURLY_L`, and the last 12 hours on the matrix.
+| Shown | Meaning |
+|-------|---------|
+| `  0L` | No flow |
+| ` --L` | No sample yet — the first second after boot |
+| ` --C` / ` --H` | The DHT22 has not answered for three reads running |
+
+A page with no reading still shows its unit letter, so the display says
+which value is missing rather than going blank.
+
+Rounding to the whole unit is deliberate. This station trends on the MQTT
+series and on the matrix beside it, not on the instant, so a precise
+figure was never what the 7-segment was for.
+
+The running total is not one of the pages. It is on MQTT as `TOTAL_L`, the
+hourly series as `HOURLY_L`, and the last 12 hours on the matrix.
+
+Page dwell time is `displayPageInterval` in the sketch; the pages
+themselves are the `PAGE_*` enum and `renderDisplay()`.
 
 Like the other stations, the display is driven straight from the sensor
 and never touches the network, so the number stays live and correct while
@@ -526,12 +539,19 @@ voltage — enough branching to make both harder to read for no gain, and
 this board is meant to grow features the Nano has no room for — the
 hourly matrix above is the first of them.
 
-The measurement core — the ISR, the rate maths, the hourly bucket and the
-TM1637 logic — is still byte-for-byte identical between the two sketches.
-The R4 build adds to it (a `matrixSetCurrentHour()` call at the end of the
-sample window, a `matrixRollHour()` call when an hour closes, and the
-matrix helpers) but changes none of it, so `diff` remains the tool for
-keeping the two in step:
+The measurement core — the ISR, the rate maths and the hourly bucket — is
+still byte-for-byte identical between the two sketches, and the R4 build
+only adds to it (a `matrixSetCurrentHour()` call at the end of the sample
+window, a `matrixRollHour()` call when an hour closes, `readClimate()` on
+its own tick, and the matrix helpers).
+
+**The TM1637 logic is the one part that has genuinely diverged.** The Nano
+build still shows a single page of flow rate; this one rotates three and
+carries the unit glyphs and layout helper that go with it. There is
+nothing to port back — the Nano has no climate sensor to page to — so the
+two display blocks are now expected to differ rather than to match.
+
+`diff` remains the tool for keeping the rest in step:
 
 ```sh
 diff Arduino/FlowSense/FlowSense.ino Arduino/FlowSenseR4/FlowSenseR4.ino
