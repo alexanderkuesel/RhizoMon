@@ -67,8 +67,18 @@ TM1637Display display(DISPCLK, DISPDIO);
 
 DHT dht(DHTPIN, DHTTYPE);
 
-// "----" - shown while there is no valid reading to display.
+// "----" - shown while the display is being taken out of service.
 const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
+
+// R4: unit tags for the rotating pages, drawn in the rightmost digit. The
+// module has no decimal point and its one piece of punctuation is a centre
+// colon that reads as a clock, so a bare number is the whole of what a
+// digit can say - and three pages of bare numbers is exactly the ambiguity
+// that got an earlier two-page rotation removed. Spending the last digit
+// on a letter buys back the labelling the hardware otherwise cannot do.
+const uint8_t SEG_UNIT_L = SEG_D | SEG_E | SEG_F;                  // L, L/min
+const uint8_t SEG_UNIT_C = SEG_A | SEG_D | SEG_E | SEG_F;          // C, degrees
+const uint8_t SEG_UNIT_H = SEG_B | SEG_C | SEG_E | SEG_F | SEG_G;  // H, humidity
 
 // ------------------*****---------------------
 // R4: onboard 12x8 LED matrix, showing the last 12 hours of water use -
@@ -155,6 +165,11 @@ const unsigned long hourInterval    = 3600000UL;
 // at a tap moves far slower than anything else here, so this is
 // deliberately no faster than the publish tick.
 const unsigned long climateInterval = 10000;
+
+// R4: how long each page holds the display before the next one takes over.
+// Three pages, so the full cycle is three times this. Long enough to read
+// and look away, short enough that the number you want is never far off.
+const unsigned long displayPageInterval = 5000;
 
 // Consecutive failed reads before the cached values are declared stale and
 // stop being published. A DHT22 drops the occasional frame on a long run
@@ -261,6 +276,17 @@ unsigned long previousClimateMillis = 0;
 // Redrawing on every display tick regardless would be four times the bus
 // traffic for the same digits, so the write is gated on this instead.
 bool displayDirty = true;
+
+// R4: which of the three pages is currently up. A fresh reading only dirties
+// the display if the page showing it is the one on screen.
+enum DisplayPage : uint8_t {
+  PAGE_RATE = 0,
+  PAGE_TEMP,
+  PAGE_HUM,
+  PAGE_COUNT
+};
+uint8_t displayPage = PAGE_RATE;
+unsigned long previousDisplayMillis = 0;
 
 unsigned long heartBeat = 0;
 long cachedRssi = 0;
@@ -467,6 +493,64 @@ void matrixRender() {
   matrix.renderBitmap(frame, matrixRows, matrixCols);
 }
 
+// R4: lay out one page - up to three digits of value, right-aligned, with
+// the unit letter fixed in the rightmost digit. Blank leading digits rather
+// than leading zeros, so "8 L/min" reads as "8" and not "008".
+//
+// Out-of-range values are clamped rather than allowed to wrap. A display
+// pinned at "999" is visibly pinned; a wrapped number looks like a real
+// reading and is the more dangerous of the two failures.
+void displayValueWithUnit(long value, uint8_t unitSegments, bool valid) {
+  uint8_t seg[4] = {0, 0, 0, unitSegments};
+
+  // No reading yet, or the sensor has gone quiet: "--" against the unit
+  // letter, so the page still says which reading is missing.
+  if (!valid) {
+    seg[1] = SEG_G;
+    seg[2] = SEG_G;
+    display.setSegments(seg);
+    return;
+  }
+
+  bool negative = (value < 0);
+  if (negative) {
+    value = -value;
+    if (value > 99) value = 99;    // the minus sign costs one of the three
+  } else {
+    if (value > 999) value = 999;
+  }
+
+  int8_t pos = 2;
+  do {
+    seg[pos--] = display.encodeDigit((uint8_t)(value % 10));
+    value /= 10;
+  } while (value > 0 && pos >= 0);
+
+  if (negative && pos >= 0) {
+    seg[pos] = SEG_G;
+  }
+
+  display.setSegments(seg);
+}
+
+// R4: draw whichever page is currently up. Every value is rounded to a
+// whole unit - the display has four digits and no decimal point, and this
+// station trends on the MQTT series and the matrix, not on the instant.
+void renderDisplay() {
+  switch (displayPage) {
+    case PAGE_TEMP:
+      displayValueWithUnit(lroundf(ambientTempC), SEG_UNIT_C, haveClimate);
+      break;
+    case PAGE_HUM:
+      displayValueWithUnit(lroundf(ambientHumidityPct), SEG_UNIT_H, haveClimate);
+      break;
+    case PAGE_RATE:
+    default:
+      displayValueWithUnit(lroundf(flowRateLpm), SEG_UNIT_L, haveSample);
+      break;
+  }
+}
+
 // R4: sample the DHT22. readHumidity() performs the bus transaction and
 // caches the frame; readTemperature() then reads that same cached frame
 // rather than starting a second one, so this pair costs one exchange with
@@ -528,10 +612,12 @@ void setup() {
   // so the falling edge is the one to count.
   attachInterrupt(digitalPinToInterrupt(FLOWPIN), pulseISR, FALLING);
 
-  // Dashes until the first sample window closes, so a wired-up display is
-  // visibly alive from boot rather than looking dead for the first second.
+  // R4: draw the first page immediately, so a wired-up display is visibly
+  // alive from boot rather than looking dead for the first second. It reads
+  // " --L" until the first sample window closes - already saying which page
+  // is up and that the value is not in yet.
   display.setBrightness(2);
-  display.setSegments(SEG_DASHES);
+  renderDisplay();
 
   // R4: begin() claims a free FSP timer and multiplexes the matrix from a
   // 10kHz periodic interrupt. Nothing else in this sketch wants a timer.
@@ -553,6 +639,7 @@ void setup() {
   previousSampleMillis = millis();
   hourStartMillis = previousSampleMillis;
   previousClimateMillis = previousSampleMillis;
+  previousDisplayMillis = previousSampleMillis;
 
   Serial.println("Setup complete, entering main loop");
 }
@@ -604,36 +691,32 @@ void loop() {
     // count up to a minute and divide out the calibration constant.
     flowRateLpm = ((float)deltaPulses * 60000.0f) / (pulsesPerLitre * (float)elapsedMs);
     haveSample = true;
-    displayDirty = true;
+    if (displayPage == PAGE_RATE) {
+      displayDirty = true;
+    }
     matrixSetCurrentHour(hourLitres());
+  }
+
+  // R4: rotate the readout through flow rate, temperature and humidity,
+  // five seconds each. Each page carries its unit in the last digit, which
+  // is what makes a rotation readable at all here - see the SEG_UNIT_*
+  // glyphs and README > Display.
+  if (currentMillis - previousDisplayMillis >= displayPageInterval) {
+    previousDisplayMillis = currentMillis;
+    displayPage = (uint8_t)((displayPage + 1) % PAGE_COUNT);
+    displayDirty = true;
   }
 
   // Local readout. Independent of WiFi and MQTT on purpose: the meter sits
   // out at the tap, and the numbers should be readable standing over it
-  // whether or not the network or the broker is up. The two pages take
-  // turns; the colon tells them apart (see README > Display).
-  // The readout only changes when a sample window closes, so the write is
-  // gated on that rather than issued on a timer.
+  // whether or not the network or the broker is up.
+  //
+  // The write is gated on the dirty flag rather than issued on a timer: the
+  // digits only change when the page flips or when a fresh reading lands on
+  // the page that is currently up.
   if (displayDirty) {
     displayDirty = false;
-
-    if (!haveSample) {
-      display.setSegments(SEG_DASHES);
-    } else {
-      // Whole litres per minute, right-aligned, no colon.
-      //
-      // The module's only punctuation is a single centre colon, and an
-      // earlier version lit it as a stand-in decimal point ("07:50" for
-      // 7.50 L/min). Nobody reads it that way - it looks like a clock - so
-      // the rate is now shown as a plain whole number instead of being
-      // dressed up with a separator the hardware cannot really provide.
-      // Resolution to the litre is enough here: the matrix and the hourly
-      // MQTT series are what this station trends on, not the instant.
-      long lpm = lroundf(flowRateLpm);
-      if (lpm < 0)    lpm = 0;
-      if (lpm > 9999) lpm = 9999;
-      display.showNumberDec((int)lpm);
-    }
+    renderDisplay();
   }
 
   // R4: the bars change when the live hour's bar grows or an hour rolls,
@@ -674,6 +757,9 @@ void loop() {
   if (currentMillis - previousClimateMillis >= climateInterval) {
     previousClimateMillis = currentMillis;
     readClimate();
+    if (displayPage == PAGE_TEMP || displayPage == PAGE_HUM) {
+      displayDirty = true;
+    }
   }
 
   // Publish readings. This block runs whether or not the network is up so
