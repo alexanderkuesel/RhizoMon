@@ -1,6 +1,7 @@
 // FlowSenseR4
 // UNO R4 WiFi build of the FlowSense water meter: a YF-S201 Hall-effect
-// flow sensor, a TM1637 4-digit display and MQTT publishing to MUTHUR.
+// flow sensor, a DHT22 ambient temperature/humidity sensor, a TM1637
+// 4-digit display and MQTT publishing to MUTHUR.
 // Kept deliberately close to Arduino/FlowSense (Nano 33 IoT) so the two
 // stay diffable; everything that differs is marked "R4:".
 // Alexander Kuesel
@@ -11,6 +12,13 @@
 #include <WiFiS3.h>
 #include <PubSubClient.h>
 #include <TM1637Display.h>
+// R4: DHT22 ambient temperature and humidity at the tap. Install "DHT
+// sensor library" (Adafruit) from the Library Manager; it pulls in
+// "Adafruit Unified Sensor" as a dependency. The plain DHT class is used
+// rather than the DHT_Unified wrapper in Arduino/FermentationWard - one
+// bus transaction and two floats, with no sensor-event structs to thread
+// through a loop that only wants the numbers.
+#include <DHT.h>
 // R4: bundled with the board package, like WiFiS3 - not a Library Manager
 // install. Pixel work needs nothing else; ArduinoGraphics is only required
 // if you want text on the matrix.
@@ -43,6 +51,21 @@
 #define DISPDIO 7  // DIO
 
 TM1637Display display(DISPCLK, DISPDIO);
+
+// R4: DHT22 data line. The display took D4 and D7 because they are the
+// only header pins that are neither interrupt-capable nor PWM; by that
+// same rule the cheapest pin left would be A0 - except A0 is this board's
+// only DAC output, which is the more expensive thing to spend. D5 costs
+// one PWM channel out of six and no interrupt channel, so it is the
+// cheaper pin, and D3 and D8 stay reserved for a second flow meter.
+//
+// The DHT22 is a single-wire bidirectional bus and needs a pull-up to its
+// supply; most breakout modules have one fitted, a bare 4-pin sensor does
+// not. See README > Wiring.
+#define DHTPIN  5
+#define DHTTYPE DHT22
+
+DHT dht(DHTPIN, DHTTYPE);
 
 // "----" - shown while there is no valid reading to display.
 const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
@@ -105,6 +128,11 @@ const char RATE_topic[]   = "MUTHUR/NDATA/FLOW/RATE_LPM";
 const char TOTAL_topic[]  = "MUTHUR/NDATA/FLOW/TOTAL_L";
 const char PULSES_topic[] = "MUTHUR/NDATA/FLOW/PULSES";
 const char HOURLY_topic[] = "MUTHUR/NDATA/FLOW/HOURLY_L";
+// R4: the climate pair is under the same FLOW station prefix rather than a
+// station of its own - it describes the air at this tap, and it is the
+// same board publishing it, so it lives and dies with the flow topics.
+const char TEMP_topic[]   = "MUTHUR/NDATA/FLOW/TEMP_C";
+const char HUM_topic[]    = "MUTHUR/NDATA/FLOW/HUMIDITY_PCT";
 const char STATUS_topic[] = "MUTHUR/DIAG/FLOW/STATUS";
 const char HB_topic[]     = "MUTHUR/DIAG/FLOW/HB";
 // ------------------*****---------------------
@@ -117,6 +145,23 @@ const unsigned long diagInterval    = 30000;  // publish diagnostics every 30s
 // not wall-clock hours - nothing here is time-synced, so "the last hour"
 // means the last 3600 seconds of uptime.
 const unsigned long hourInterval    = 3600000UL;
+
+// R4: how often to read the DHT22. Two constraints meet here. The sensor
+// will not produce a fresh conversion more often than once every two
+// seconds, and the read is a blocking bit-banged exchange that the library
+// performs with interrupts disabled - roughly 5ms per read in which a flow
+// pulse can be merged into its neighbour (see README > Temperature and
+// humidity, which puts a number on the resulting error). Air temperature
+// at a tap moves far slower than anything else here, so this is
+// deliberately no faster than the publish tick.
+const unsigned long climateInterval = 10000;
+
+// Consecutive failed reads before the cached values are declared stale and
+// stop being published. A DHT22 drops the occasional frame on a long run
+// and one bad checksum is not a dead sensor - but half a minute of silence
+// is, and republishing an old temperature forever is worse than publishing
+// nothing and letting the dashboard show a gap.
+const unsigned long climateFailuresBeforeStale = 3;
 
 // Retry pacing. Nothing in this sketch retries in a tight loop: every
 // reconnect attempt is spaced out so loop() always keeps turning over.
@@ -202,6 +247,14 @@ unsigned long totalPulses = 0;
 
 float flowRateLpm = 0.0f;
 bool haveSample = false;   // false until the first full sample window closes
+
+// R4: last good climate reading. Cached rather than re-read at the point
+// of use, because the read is the expensive part - see readClimate().
+float ambientTempC = 0.0f;
+float ambientHumidityPct = 0.0f;
+bool haveClimate = false;             // false until the first good read
+unsigned long climateFailures = 0;    // consecutive; a good read clears it
+unsigned long previousClimateMillis = 0;
 
 // The TM1637 is bit-banged at ~1ms per full four-digit write, and its
 // contents only change when a sample window closes or the page flips.
@@ -414,6 +467,33 @@ void matrixRender() {
   matrix.renderBitmap(frame, matrixRows, matrixCols);
 }
 
+// R4: sample the DHT22. readHumidity() performs the bus transaction and
+// caches the frame; readTemperature() then reads that same cached frame
+// rather than starting a second one, so this pair costs one exchange with
+// the sensor, not two.
+//
+// Either value coming back NaN means a dropped or corrupt frame. Keep the
+// previous reading over it, since a single bad checksum is routine, but
+// stop publishing once the failures stack up so a sensor that has been
+// unplugged goes quiet instead of repeating its last number forever.
+void readClimate() {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();  // Celsius
+
+  if (isnan(humidity) || isnan(temperature)) {
+    climateFailures++;
+    if (climateFailures >= climateFailuresBeforeStale) {
+      haveClimate = false;
+    }
+    return;
+  }
+
+  climateFailures = 0;
+  ambientHumidityPct = humidity;
+  ambientTempC = temperature;
+  haveClimate = true;
+}
+
 void setup() {
   Serial.begin(9600);
 
@@ -460,6 +540,10 @@ void setup() {
   matrix.begin();
   matrixRender();
 
+  // R4: the DHT22 wants a moment after power-up before it will answer, and
+  // the first read is a full climateInterval away, which covers it.
+  dht.begin();
+
   WiFi.setTimeout(wifiConnectTimeout);
 
   client.setServer(server, 1883);
@@ -468,6 +552,7 @@ void setup() {
 
   previousSampleMillis = millis();
   hourStartMillis = previousSampleMillis;
+  previousClimateMillis = previousSampleMillis;
 
   Serial.println("Setup complete, entering main loop");
 }
@@ -582,6 +667,15 @@ void loop() {
     Serial.println(" L");
   }
 
+  // R4: sample ambient temperature and humidity. On its own tick rather
+  // than folded into the publish block below, so the read cadence - which
+  // is what governs how often the flow interrupt is briefly masked - can
+  // be slowed without also slowing down everything that is published.
+  if (currentMillis - previousClimateMillis >= climateInterval) {
+    previousClimateMillis = currentMillis;
+    readClimate();
+  }
+
   // Publish readings. This block runs whether or not the network is up so
   // that the serial log always shows the board is alive and metering.
   if (currentMillis - previousPublishMillis >= publishInterval) {
@@ -592,11 +686,26 @@ void loop() {
     char totalChar[16];
     char pulsesChar[16];
     char hbChar[16];
+    char tempChar[16];
+    char humChar[16];
 
     snprintf(rateChar, sizeof(rateChar), "%.2f", flowRateLpm);
     snprintf(totalChar, sizeof(totalChar), "%.3f", totalLitres());
     snprintf(pulsesChar, sizeof(pulsesChar), "%lu", totalPulses);
     snprintf(hbChar, sizeof(hbChar), "%lu", heartBeat);
+
+    // R4: one decimal place, which is the DHT22's own resolution - more
+    // would dress up precision the sensor does not have. The serial line
+    // keeps a column for these either way; MQTT gets nothing at all when
+    // there is no reading, rather than a placeholder a dashboard would
+    // happily plot as a number.
+    if (haveClimate) {
+      snprintf(tempChar, sizeof(tempChar), "%.1f", ambientTempC);
+      snprintf(humChar, sizeof(humChar), "%.1f", ambientHumidityPct);
+    } else {
+      snprintf(tempChar, sizeof(tempChar), "--");
+      snprintf(humChar, sizeof(humChar), "--");
+    }
 
     if (mqttUp) {
       if (haveSample) {
@@ -605,6 +714,10 @@ void loop() {
       client.publish(TOTAL_topic, totalChar);
       client.publish(PULSES_topic, pulsesChar);
       client.publish(HB_topic, hbChar);
+      if (haveClimate) {
+        client.publish(TEMP_topic, tempChar);
+        client.publish(HUM_topic, humChar);
+      }
     }
 
     Serial.print("HB ");
@@ -615,7 +728,11 @@ void loop() {
     Serial.print(totalChar);
     Serial.print(" L (");
     Serial.print(pulsesChar);
-    Serial.print(" pulses) | WiFi ");
+    Serial.print(" pulses) | Air: ");
+    Serial.print(tempChar);
+    Serial.print(" C ");
+    Serial.print(humChar);
+    Serial.print(" %RH | WiFi ");
     Serial.print(wifiUp() ? "up" : "DOWN");
     Serial.print(" | MQTT ");
     Serial.println(mqttUp ? "up" : "DOWN");
@@ -627,7 +744,25 @@ void loop() {
   if (currentMillis - previousDiagMillis >= diagInterval) {
     previousDiagMillis = currentMillis;
 
-    char statusMessage[256];
+    // R4: JSON has no NaN, so a missing reading is a literal null rather
+    // than a number nobody can distinguish from a real one. Formatted
+    // first, then substituted with %s.
+    char tempField[12];
+    char humField[12];
+    if (haveClimate) {
+      snprintf(tempField, sizeof(tempField), "%.1f", ambientTempC);
+      snprintf(humField, sizeof(humField), "%.1f", ambientHumidityPct);
+    } else {
+      snprintf(tempField, sizeof(tempField), "null");
+      snprintf(humField, sizeof(humField), "null");
+    }
+
+    // R4: 320 rather than 256. The climate fields took the payload past
+    // what the original buffer left spare, and snprintf truncates in
+    // silence - which on this topic would look like a broker fault rather
+    // than a buffer one. Still well inside mqttBufferSize, which has to
+    // cover this payload plus the topic and the fixed header.
+    char statusMessage[320];
     snprintf(statusMessage, sizeof(statusMessage),
              "{\"device\": \"Arduino UNO R4 WiFi\","
              "\"rssi\": %ld,"
@@ -636,14 +771,20 @@ void loop() {
              "\"total_l\": %.3f,"
              "\"hour_l\": %.3f,"
              "\"last_hour_l\": %.3f,"
-             "\"pulses\": %lu}",
+             "\"pulses\": %lu,"
+             "\"temp_c\": %s,"
+             "\"humidity_pct\": %s,"
+             "\"climate_fails\": %lu}",
              cachedRssi,
              currentMillis / 1000,
              flowRateLpm,
              totalLitres(),
              hourLitres(),
              lastHourLitres,
-             totalPulses);
+             totalPulses,
+             tempField,
+             humField,
+             climateFailures);
 
     if (mqttUp) {
       client.publish(STATUS_topic, statusMessage);
