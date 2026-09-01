@@ -15,7 +15,7 @@ hand — picking the wrong board is what bricks a Nano 33 IoT.
 | `CompostHeat` | Nano 33 IoT | `arduino:samd` | `WiFiNINA`, `PubSubClient`, `MAX6675 library`, `TM1637` |
 | `FermentationWard` | Nano 33 IoT | `arduino:samd` | `WiFiNINA`, `PubSubClient`, `DHT sensor library`, `Adafruit Unified Sensor`, `TM1637` |
 | `FlowSense` | Nano 33 IoT | `arduino:samd` | `WiFiNINA`, `PubSubClient`, `TM1637` |
-| `FlowSenseR4` | UNO R4 WiFi | `arduino:renesas_uno` | `PubSubClient`, `TM1637` |
+| `FlowSenseR4` | UNO R4 WiFi | `arduino:renesas_uno` | `PubSubClient`, `TM1637`, `ArduinoOTA`, `DHT sensor library`, `Adafruit Unified Sensor` |
 | `BaseStation` | UNO R4 WiFi | `arduino:renesas_uno` | `ArduinoMqttClient`, `ArduinoBLE` |
 
 `WiFiS3` and `Arduino_LED_Matrix` are **not** in that column on purpose:
@@ -42,7 +42,7 @@ arduino-cli core install arduino:samd           # Nano 33 IoT
 arduino-cli core install arduino:renesas_uno    # UNO R4 WiFi
 
 # libraries - quote the names that contain spaces
-arduino-cli lib install "WiFiNINA" "PubSubClient" "TM1637"                         "MAX6675 library"                         "DHT sensor library" "Adafruit Unified Sensor"                         "ArduinoMqttClient" "ArduinoBLE"
+arduino-cli lib install "WiFiNINA" "PubSubClient" "TM1637"                         "MAX6675 library"                         "DHT sensor library" "Adafruit Unified Sensor"                         "ArduinoOTA"                         "ArduinoMqttClient" "ArduinoBLE"
 ```
 
 ### Credentials

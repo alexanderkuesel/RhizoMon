@@ -13,6 +13,7 @@ display behaviour, same topics — but on a board with room to grow. See
 
 - Arduino UNO R4 WiFi
 - YF-S201 water flow sensor (1/2" BSP, 1-30 L/min)
+- DHT22 / AM2302 temperature and humidity sensor
 - TM1637 4-digit 7-segment display module
 
 The board's onboard 12x8 LED matrix is used too, and costs no extra parts
@@ -73,13 +74,30 @@ So the pin plan is:
   pins that are neither interrupt-capable nor PWM, so they are the
   cheapest pins on the board to spend on a bit-banged display — nothing
   else would miss them.
+- **D5** for the DHT22. By the rule above the cheapest pin left would be
+  A0, except A0 is this board's only DAC output. D5 costs one PWM channel
+  out of six and no interrupt channel.
 - **D3 (IRQ0) and D8 (IRQ9) are deliberately left free.** They are the
   only two interrupt-capable pins whose channel collides with nothing, so
   they are the obvious home for a second flow meter later.
 
-Note that `BaseStation.ino` uses D5 for a switch and D7 for a relay. Those
-are separate boards today, but if you ever consolidate onto one R4, D7 is
-the collision to watch.
+Note that `BaseStation.ino` uses D5 for a switch and D7 for a relay — now
+the DHT22 and a display pin. Those are separate boards today, but if you
+ever consolidate onto one R4, both are collisions to watch.
+
+### DHT22
+
+| DHT22 pin | UNO R4 WiFi pin |
+|-----------|-----------------|
+| 1 VCC     | **5V**          |
+| 2 DATA    | **D5**          |
+| 3 —       | *not connected* |
+| 4 GND     | GND             |
+
+The DATA line is open-drain and **needs a 10 kΩ pull-up to VCC**. Three-pin
+AM2302 breakout boards (`+` / `OUT` / `-`) have one fitted; a bare 4-pin
+DHT22 does not. Keep it out of the spray — the part is not sealed, and a
+wet element reads 100% humidity for hours.
 
 ### TM1637 display
 
@@ -109,6 +127,8 @@ Install via the Arduino Library Manager:
 - **PubSubClient** (Nick O'Leary) — MQTT client
 - **TM1637** (Avishay Orpaz) — 4-digit display driver
 - **ArduinoOTA** (Juraj Andrassy) — over-the-air sketch upload
+- **DHT sensor library** (Adafruit) — DHT22 driver, which pulls in
+  **Adafruit Unified Sensor** as a dependency
 
 **WiFiS3** and **Arduino_LED_Matrix** are both bundled with the UNO R4
 board package — do not install either separately. The flow sensor needs no
@@ -165,8 +185,20 @@ replacement and existing dashboards keep working:
 | `MUTHUR/NDATA/FLOW/TOTAL_L`  | Cumulative volume since boot, litres (float, 3dp) | 10s |
 | `MUTHUR/NDATA/FLOW/PULSES`   | Cumulative raw pulse count since boot | 10s |
 | `MUTHUR/NDATA/FLOW/HOURLY_L` | Litres drawn in the hour that just closed (float, 3dp) | 1h |
-| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, pulses}` | 30s |
+| `MUTHUR/NDATA/FLOW/TEMP_C`   | Air temperature at the tap, °C (float, 1dp) | 10s |
+| `MUTHUR/NDATA/FLOW/HUMIDITY_PCT` | Relative humidity at the tap, % (float, 1dp) | 10s |
+| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, pulses, temp_c, humidity_pct, climate_fails}` | 30s |
 | `MUTHUR/DIAG/FLOW/HB`        | Heartbeat counter                | 10s       |
+
+`TEMP_C` and `HUMIDITY_PCT` have no counterpart on the Nano build, which
+simply never publishes them — the flow topics stay a drop-in either way.
+They are read every 10s and published only when the read succeeds; after
+three consecutive failures they stop being published rather than repeat a
+stale value, and the JSON fields go to `null` with `climate_fails`
+counting the run. Note the DHT22's bit-banged protocol masks interrupts
+for ~5ms per read, so at sustained flow above ~27 L/min a pulse can be
+merged — under 0.05% at the sensor's 30 L/min ceiling, against its own
+±10% accuracy. Raise `climateInterval` if that matters.
 
 `device` in the status JSON reads `Arduino UNO R4 WiFi`, so you can tell
 the two boards apart on the wire. **If you ever run both meters at once,
@@ -441,9 +473,9 @@ accumulated from `HOURLY_L`. Persisting them across reboots is in
 ## Build
 
 1. In the Arduino IDE, select **Board: Arduino UNO R4 WiFi**.
-2. Install PubSubClient and TM1637.
+2. Install PubSubClient, TM1637, ArduinoOTA and the DHT sensor library.
 3. Create `arduino_secrets.h` as described in Configuration.
-4. Wire the YF-S201 and TM1637 per the tables above.
+4. Wire the YF-S201, DHT22 and TM1637 per the tables above.
 5. Upload `FlowSenseR4.ino`.
 6. Open the Serial Monitor at 9600 baud.
 
@@ -467,7 +499,8 @@ The same by hand:
 ```sh
 arduino-cli core update-index
 arduino-cli core install arduino:renesas_uno
-arduino-cli lib install "PubSubClient" "TM1637"
+arduino-cli lib install "PubSubClient" "TM1637" "ArduinoOTA" \
+                       "DHT sensor library" "Adafruit Unified Sensor"
 
 cp Arduino/FlowSenseR4/arduino_secrets.h.example Arduino/FlowSenseR4/arduino_secrets.h
 $EDITOR Arduino/FlowSenseR4/arduino_secrets.h
