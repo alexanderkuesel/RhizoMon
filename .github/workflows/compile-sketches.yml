@@ -77,6 +77,21 @@ jobs:
               - name: Adafruit Unified Sensor
 
           - name: UNO R4 WiFi
+            sketch: Arduino/IceBath
+            fqbn: arduino:renesas_uno:unor4wifi
+            platform: arduino:renesas_uno
+            # Same set as FlowSenseR4, which IceBath is a copy of, plus
+            # the MAX6675 driver. WiFiS3 and Arduino_LED_Matrix are
+            # bundled with the renesas_uno platform; ArduinoOTA is not.
+            libraries: |
+              - name: PubSubClient
+              - name: TM1637
+              - name: ArduinoOTA
+              - name: DHT sensor library
+              - name: Adafruit Unified Sensor
+              - name: MAX6675 library
+
+          - name: UNO R4 WiFi
             sketch: Arduino/BaseStation
             fqbn: arduino:renesas_uno:unor4wifi
             platform: arduino:renesas_uno

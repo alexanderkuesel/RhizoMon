@@ -29,7 +29,7 @@ OTA_PASS ?= $(shell sed -n 's/^[[:space:]]*#define[[:space:]]\{1,\}SECRET_OTA_PA
 SKETCH_DIR := Arduino/$(SKETCH)
 
 # Sketches targeting the UNO R4 WiFi; everything else is a Nano 33 IoT.
-R4_SKETCHES := BaseStation FlowSenseR4
+R4_SKETCHES := BaseStation FlowSenseR4 IceBath
 
 ifeq ($(filter $(SKETCH),$(R4_SKETCHES)),$(SKETCH))
 FQBN     := arduino:renesas_uno:unor4wifi
@@ -53,6 +53,9 @@ LIBS_FermentationWard := "WiFiNINA" "PubSubClient" "DHT sensor library" "Adafrui
 LIBS_FlowSense        := "WiFiNINA" "PubSubClient" "TM1637"
 LIBS_FlowSenseR4      := "PubSubClient" "TM1637" "ArduinoOTA" \
                          "DHT sensor library" "Adafruit Unified Sensor"
+LIBS_IceBath          := "PubSubClient" "TM1637" "ArduinoOTA" \
+                         "DHT sensor library" "Adafruit Unified Sensor" \
+                         "MAX6675 library"
 LIBS_BaseStation      := "ArduinoMqttClient" "ArduinoBLE"
 
 LIBS := $(LIBS_$(SKETCH))
@@ -73,7 +76,8 @@ deps-all:
 	arduino-cli core install arduino:samd
 	arduino-cli core install arduino:renesas_uno
 	arduino-cli lib install $(LIBS_CompostHeat) $(LIBS_FermentationWard) \
-	                        $(LIBS_FlowSense) $(LIBS_FlowSenseR4) $(LIBS_BaseStation)
+	                        $(LIBS_FlowSense) $(LIBS_FlowSenseR4) \
+	                        $(LIBS_IceBath) $(LIBS_BaseStation)
 
 compile:
 	arduino-cli compile --fqbn $(FQBN) $(SKETCH_DIR)
