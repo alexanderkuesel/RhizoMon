@@ -75,6 +75,7 @@ jobs:
               - name: ArduinoOTA
               - name: DHT sensor library
               - name: Adafruit Unified Sensor
+              - name: MAX6675 library
 
           - name: UNO R4 WiFi
             sketch: Arduino/BaseStation

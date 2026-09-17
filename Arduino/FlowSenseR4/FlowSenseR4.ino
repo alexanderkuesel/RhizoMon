@@ -1,7 +1,8 @@
 // FlowSenseR4
 // UNO R4 WiFi build of the FlowSense water meter: a YF-S201 Hall-effect
-// flow sensor, a DHT22 ambient temperature/humidity sensor, a TM1637
-// 4-digit display and MQTT publishing to MUTHUR.
+// flow sensor, a DHT22 ambient temperature/humidity sensor, a MAX6675
+// K-type thermocouple probe, a TM1637 4-digit display and MQTT publishing
+// to MUTHUR.
 // Kept deliberately close to Arduino/FlowSense (Nano 33 IoT) so the two
 // stay diffable; everything that differs is marked "R4:".
 // Alexander Kuesel
@@ -19,6 +20,13 @@
 // bus transaction and two floats, with no sensor-event structs to thread
 // through a loop that only wants the numbers.
 #include <DHT.h>
+// R4: MAX6675 K-type thermocouple amplifier - the same part, and the same
+// "MAX6675 library" (Adafruit), as Arduino/CompostHeat, so both probes on
+// this network behave identically. The library is plain Arduino API with
+// architectures=*, so it builds on renesas_uno unchanged. It declares
+// LiquidCrystal as a dependency, which the Library Manager installs
+// alongside it; nothing here includes it.
+#include <max6675.h>
 // R4: bundled with the board package, like WiFiS3 - not a Library Manager
 // install. Pixel work needs nothing else; ArduinoGraphics is only required
 // if you want text on the matrix.
@@ -67,6 +75,28 @@ TM1637Display display(DISPCLK, DISPDIO);
 
 DHT dht(DHTPIN, DHTTYPE);
 
+// R4: MAX6675 thermocouple amplifier. Read-only SPI, bit-banged by the
+// library over any three digital pins - the same arrangement as
+// Arduino/CompostHeat, on the pins this board has left.
+//
+// By the rule above, D9 and D10 are the only header pins still free that
+// raise no interrupt: they cost one PWM channel each and nothing else. The
+// third line has to cost something, and D6 is the cheapest of what remains
+// - its interrupt channel (IRQ4) is shared with D11, so spending D6 leaves
+// IRQ4 still reachable there and loses no channel at all. That keeps D3
+// and D8 reserved for a second flow meter, A0 as the board's only DAC, and
+// A2 holding IRQ7, the last unshared channel.
+//
+// D10 is also the hardware-SPI chip select, but nothing here uses the SPI
+// peripheral and a chip select is only ever a plain GPIO. D11/D12/D13 stay
+// free, so a real SPI device can still be added later with its CS on any
+// spare pin.
+#define MAXCLK 6   // SCK
+#define MAXCS  9   // CS
+#define MAXSO  10  // SO / DO (MISO)
+
+MAX6675 thermocouple(MAXCLK, MAXCS, MAXSO);
+
 // "----" - shown while the display is being taken out of service.
 const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
 
@@ -79,6 +109,11 @@ const uint8_t SEG_DASHES[] = {SEG_G, SEG_G, SEG_G, SEG_G};
 const uint8_t SEG_UNIT_L = SEG_D | SEG_E | SEG_F;                  // L, L/min
 const uint8_t SEG_UNIT_C = SEG_A | SEG_D | SEG_E | SEG_F;          // C, degrees
 const uint8_t SEG_UNIT_H = SEG_B | SEG_C | SEG_E | SEG_F | SEG_G;  // H, humidity
+// R4: the probe reads degrees too, but labelling it C as well would put two
+// pages of bare degrees on the same rotation - exactly the ambiguity the
+// unit tags exist to remove. P for probe, so each page still says what it
+// is measuring rather than only what the number's unit is.
+const uint8_t SEG_UNIT_P = SEG_A | SEG_B | SEG_E | SEG_F | SEG_G;  // P, probe
 
 // ------------------*****---------------------
 // R4: onboard 12x8 LED matrix, showing the last 12 hours of water use -
@@ -143,6 +178,13 @@ const char HOURLY_topic[] = "MUTHUR/NDATA/FLOW/HOURLY_L";
 // same board publishing it, so it lives and dies with the flow topics.
 const char TEMP_topic[]   = "MUTHUR/NDATA/FLOW/TEMP_C";
 const char HUM_topic[]    = "MUTHUR/NDATA/FLOW/HUMIDITY_PCT";
+// R4: PROBE rather than a second TEMP, so the station's two temperatures
+// can never be confused on the wire: TEMP_C is the air at the tap, PROBE_C
+// is whatever the K-type probe is clipped to. The fault flag rides along
+// under DIAG like Arduino/CompostHeat's, because a gap in PROBE_C that a
+// dashboard cannot attribute is worse than no gap at all.
+const char PROBE_topic[]  = "MUTHUR/NDATA/FLOW/PROBE_C";
+const char PROBE_FAULT_topic[] = "MUTHUR/DIAG/FLOW/PROBE_FAULT";
 const char STATUS_topic[] = "MUTHUR/DIAG/FLOW/STATUS";
 const char HB_topic[]     = "MUTHUR/DIAG/FLOW/HB";
 // ------------------*****---------------------
@@ -166,10 +208,23 @@ const unsigned long hourInterval    = 3600000UL;
 // deliberately no faster than the publish tick.
 const unsigned long climateInterval = 10000;
 
+// R4: how often to read the MAX6675. Two floors sit under this. The part
+// takes ~220ms to convert and hands back the same word if asked sooner,
+// and the library's bit-bang is 16 bits of delayMicroseconds(10) - about
+// 0.35ms of CPU per read. Unlike the DHT22's exchange that read leaves
+// interrupts enabled throughout, so however often it runs it cannot merge
+// a flow pulse. One second is clear of both floors and matches
+// Arduino/CompostHeat.
+const unsigned long probeInterval = 1000;
+
 // R4: how long each page holds the display before the next one takes over.
-// Three pages, so the full cycle is three times this. Long enough to read
-// and look away, short enough that the number you want is never far off.
-const unsigned long displayPageInterval = 5000;
+// Four pages, so the full cycle is four times this. Long enough to read and
+// look away, short enough that the number you want is never far off -
+// trimmed from 5s when the probe made a fourth page, which holds the whole
+// rotation at 16s instead of stretching it to 20s. Twenty seconds of
+// waiting for the flow rate to come round again is the thing this readout
+// must not do.
+const unsigned long displayPageInterval = 4000;
 
 // Consecutive failed reads before the cached values are declared stale and
 // stop being published. A DHT22 drops the occasional frame on a long run
@@ -177,6 +232,13 @@ const unsigned long displayPageInterval = 5000;
 // is, and republishing an old temperature forever is worse than publishing
 // nothing and letting the dashboard show a gap.
 const unsigned long climateFailuresBeforeStale = 3;
+
+// R4: the same staleness rule for the thermocouple, for the same reason - a
+// marginal SO line drops the occasional word, an unplugged probe never
+// comes back. This one is a fault flag rather than a checksum: the MAX6675
+// reports an open circuit explicitly in bit D2 of its 16-bit word, which
+// the library turns into NAN. Three reads is three seconds of it.
+const unsigned long probeFailuresBeforeStale = 3;
 
 // Retry pacing. Nothing in this sketch retries in a tight loop: every
 // reconnect attempt is spaced out so loop() always keeps turning over.
@@ -271,6 +333,13 @@ bool haveClimate = false;             // false until the first good read
 unsigned long climateFailures = 0;    // consecutive; a good read clears it
 unsigned long previousClimateMillis = 0;
 
+// R4: last good thermocouple reading, cached on the same terms as the
+// climate pair above.
+float probeTempC = 0.0f;
+bool haveProbe = false;             // false until the first good read
+unsigned long probeFailures = 0;    // consecutive; a good read clears it
+unsigned long previousProbeMillis = 0;
+
 // The TM1637 is bit-banged at ~1ms per full four-digit write, and its
 // contents only change when a sample window closes or the page flips.
 // Redrawing on every display tick regardless would be four times the bus
@@ -283,6 +352,7 @@ enum DisplayPage : uint8_t {
   PAGE_RATE = 0,
   PAGE_TEMP,
   PAGE_HUM,
+  PAGE_PROBE,
   PAGE_COUNT
 };
 uint8_t displayPage = PAGE_RATE;
@@ -544,6 +614,9 @@ void renderDisplay() {
     case PAGE_HUM:
       displayValueWithUnit(lroundf(ambientHumidityPct), SEG_UNIT_H, haveClimate);
       break;
+    case PAGE_PROBE:
+      displayValueWithUnit(lroundf(probeTempC), SEG_UNIT_P, haveProbe);
+      break;
     case PAGE_RATE:
     default:
       displayValueWithUnit(lroundf(flowRateLpm), SEG_UNIT_L, haveSample);
@@ -576,6 +649,31 @@ void readClimate() {
   ambientHumidityPct = humidity;
   ambientTempC = temperature;
   haveClimate = true;
+}
+
+// R4: sample the MAX6675. readCelsius() drops CS, clocks 16 bits out and
+// returns NAN when the open-circuit bit is set - an unplugged or broken
+// thermocouple, or an SO line left floating high. Treated exactly like a
+// dropped DHT22 frame: keep the last reading over a single bad word, go
+// quiet once they stack up.
+//
+// Note the part is unsigned. Its range is 0 to +1024 C and it cannot read
+// below freezing at all, so 0.00 C is both a real reading and what an SO
+// line stuck low returns - see README > Troubleshooting.
+void readProbe() {
+  float tempC = thermocouple.readCelsius();
+
+  if (isnan(tempC)) {
+    probeFailures++;
+    if (probeFailures >= probeFailuresBeforeStale) {
+      haveProbe = false;
+    }
+    return;
+  }
+
+  probeFailures = 0;
+  probeTempC = tempC;
+  haveProbe = true;
 }
 
 void setup() {
@@ -630,6 +728,20 @@ void setup() {
   // the first read is a full climateInterval away, which covers it.
   dht.begin();
 
+  // R4: the MAX6675 library sets its three pin modes in its constructor,
+  // which runs from __libc_init_array before this core's init() has touched
+  // the port registers - so re-apply them here, where they stick. CS idles
+  // high; pulling it low is what starts a read.
+  //
+  // The part also wants ~500ms after power-up before its first conversion
+  // is good. The first read is a full probeInterval away, which covers it
+  // without the blocking delay(500) that Arduino/CompostHeat needs in its
+  // setup().
+  pinMode(MAXCLK, OUTPUT);
+  pinMode(MAXSO, INPUT);
+  pinMode(MAXCS, OUTPUT);
+  digitalWrite(MAXCS, HIGH);
+
   WiFi.setTimeout(wifiConnectTimeout);
 
   client.setServer(server, 1883);
@@ -639,6 +751,7 @@ void setup() {
   previousSampleMillis = millis();
   hourStartMillis = previousSampleMillis;
   previousClimateMillis = previousSampleMillis;
+  previousProbeMillis = previousSampleMillis;
   previousDisplayMillis = previousSampleMillis;
 
   Serial.println("Setup complete, entering main loop");
@@ -762,6 +875,18 @@ void loop() {
     }
   }
 
+  // R4: sample the thermocouple, on its own tick for the same reason the
+  // climate pair has one - read cadence and publish cadence are separate
+  // concerns. This read is the cheap one: a third of a millisecond of
+  // bit-banging with interrupts left enabled the whole way through.
+  if (currentMillis - previousProbeMillis >= probeInterval) {
+    previousProbeMillis = currentMillis;
+    readProbe();
+    if (displayPage == PAGE_PROBE) {
+      displayDirty = true;
+    }
+  }
+
   // Publish readings. This block runs whether or not the network is up so
   // that the serial log always shows the board is alive and metering.
   if (currentMillis - previousPublishMillis >= publishInterval) {
@@ -774,6 +899,8 @@ void loop() {
     char hbChar[16];
     char tempChar[16];
     char humChar[16];
+    char probeChar[16];
+    char probeFaultChar[2];
 
     snprintf(rateChar, sizeof(rateChar), "%.2f", flowRateLpm);
     snprintf(totalChar, sizeof(totalChar), "%.3f", totalLitres());
@@ -793,6 +920,22 @@ void loop() {
       snprintf(humChar, sizeof(humChar), "--");
     }
 
+    // R4: two decimal places, which is what the MAX6675's 0.25 C steps
+    // actually resolve to - the same form Arduino/CompostHeat publishes the
+    // same part in.
+    if (haveProbe) {
+      snprintf(probeChar, sizeof(probeChar), "%.2f", probeTempC);
+    } else {
+      snprintf(probeChar, sizeof(probeChar), "--");
+    }
+
+    // The gap in PROBE_C and the reason for it, published together: "1"
+    // means there is no current reading, so a dashboard can tell a dead
+    // probe from a dead broker. Written by hand rather than with strcpy,
+    // which would be the sketch's only <string.h> call.
+    probeFaultChar[0] = haveProbe ? '0' : '1';
+    probeFaultChar[1] = '\0';
+
     if (mqttUp) {
       if (haveSample) {
         client.publish(RATE_topic, rateChar);
@@ -804,6 +947,12 @@ void loop() {
         client.publish(TEMP_topic, tempChar);
         client.publish(HUM_topic, humChar);
       }
+      if (haveProbe) {
+        client.publish(PROBE_topic, probeChar);
+      }
+      // Unconditional, unlike the readings: the whole point of this one is
+      // to be there when the reading is not.
+      client.publish(PROBE_FAULT_topic, probeFaultChar);
     }
 
     Serial.print("HB ");
@@ -818,7 +967,9 @@ void loop() {
     Serial.print(tempChar);
     Serial.print(" C ");
     Serial.print(humChar);
-    Serial.print(" %RH | WiFi ");
+    Serial.print(" %RH | Probe: ");
+    Serial.print(probeChar);
+    Serial.print(" C | WiFi ");
     Serial.print(wifiUp() ? "up" : "DOWN");
     Serial.print(" | MQTT ");
     Serial.println(mqttUp ? "up" : "DOWN");
@@ -835,6 +986,7 @@ void loop() {
     // first, then substituted with %s.
     char tempField[12];
     char humField[12];
+    char probeField[12];
     if (haveClimate) {
       snprintf(tempField, sizeof(tempField), "%.1f", ambientTempC);
       snprintf(humField, sizeof(humField), "%.1f", ambientHumidityPct);
@@ -842,13 +994,20 @@ void loop() {
       snprintf(tempField, sizeof(tempField), "null");
       snprintf(humField, sizeof(humField), "null");
     }
+    if (haveProbe) {
+      snprintf(probeField, sizeof(probeField), "%.2f", probeTempC);
+    } else {
+      snprintf(probeField, sizeof(probeField), "null");
+    }
 
-    // R4: 320 rather than 256. The climate fields took the payload past
-    // what the original buffer left spare, and snprintf truncates in
-    // silence - which on this topic would look like a broker fault rather
-    // than a buffer one. Still well inside mqttBufferSize, which has to
-    // cover this payload plus the topic and the fixed header.
-    char statusMessage[320];
+    // R4: 400 rather than 256. The climate fields took the payload past
+    // what the original buffer left spare and the probe fields took it
+    // further, and snprintf truncates in silence - which on this topic
+    // would look like a broker fault rather than a buffer one. The worst
+    // case here is a little under 300 bytes, and it stays well inside
+    // mqttBufferSize, which has to cover this payload plus the topic and
+    // the fixed header.
+    char statusMessage[400];
     snprintf(statusMessage, sizeof(statusMessage),
              "{\"device\": \"Arduino UNO R4 WiFi\","
              "\"rssi\": %ld,"
@@ -860,7 +1019,9 @@ void loop() {
              "\"pulses\": %lu,"
              "\"temp_c\": %s,"
              "\"humidity_pct\": %s,"
-             "\"climate_fails\": %lu}",
+             "\"climate_fails\": %lu,"
+             "\"probe_c\": %s,"
+             "\"probe_fails\": %lu}",
              cachedRssi,
              currentMillis / 1000,
              flowRateLpm,
@@ -870,7 +1031,9 @@ void loop() {
              totalPulses,
              tempField,
              humField,
-             climateFailures);
+             climateFailures,
+             probeField,
+             probeFailures);
 
     if (mqttUp) {
       client.publish(STATUS_topic, statusMessage);

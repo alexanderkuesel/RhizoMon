@@ -52,7 +52,8 @@ LIBS_CompostHeat      := "WiFiNINA" "PubSubClient" "MAX6675 library" "TM1637"
 LIBS_FermentationWard := "WiFiNINA" "PubSubClient" "DHT sensor library" "Adafruit Unified Sensor" "TM1637"
 LIBS_FlowSense        := "WiFiNINA" "PubSubClient" "TM1637"
 LIBS_FlowSenseR4      := "PubSubClient" "TM1637" "ArduinoOTA" \
-                         "DHT sensor library" "Adafruit Unified Sensor"
+                         "DHT sensor library" "Adafruit Unified Sensor" \
+                         "MAX6675 library"
 LIBS_BaseStation      := "ArduinoMqttClient" "ArduinoBLE"
 
 LIBS := $(LIBS_$(SKETCH))
