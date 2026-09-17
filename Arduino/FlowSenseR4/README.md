@@ -1,15 +1,11 @@
 # FlowSenseR4
 
 UNO R4 WiFi build of the [FlowSense](../FlowSense) water meter: a YF-S201
-Hall-effect flow sensor, a DHT22 for the air at the tap, a MAX6675 K-type
-thermocouple probe, a TM1637 4-digit display at the tap, and readings
-published to the MUTHUR MQTT broker.
+Hall-effect flow sensor, a TM1637 4-digit display at the tap, and
+readings published to the MUTHUR MQTT broker.
 
-The measurement core is identical to the Nano 33 IoT build — same pulse
-counting, same rate maths, same flow topics, so this board is a drop-in
-replacement for it. Everything past that is what the R4 has room for that
-the Nano does not: the climate pair, the thermocouple probe, the hourly
-matrix and over-the-air updates. See
+Functionally identical to the Nano 33 IoT build — same measurement, same
+display behaviour, same topics — but on a board with room to grow. See
 [Why a separate sketch](#why-a-separate-sketch) and
 [Expansion notes](#expansion-notes).
 
@@ -18,15 +14,12 @@ matrix and over-the-air updates. See
 - Arduino UNO R4 WiFi
 - YF-S201 water flow sensor (1/2" BSP, 1-30 L/min)
 - DHT22 / AM2302 temperature and humidity sensor
-- MAX6675 breakout board + K-type thermocouple — see
-  [Thermocouple probe](#thermocouple-probe)
 - TM1637 4-digit 7-segment display module
 
 The board's onboard 12x8 LED matrix is used too, and costs no extra parts
 and no header pins — see [LED matrix](#led-matrix).
 
-No level shifter and no divider. The only soldering is the MAX6675
-breakout's own header strip, if yours shipped loose.
+No level shifter, no divider, no soldering.
 
 ## Wiring
 
@@ -84,21 +77,9 @@ So the pin plan is:
 - **D5** for the DHT22. By the rule above the cheapest pin left would be
   A0, except A0 is this board's only DAC output. D5 costs one PWM channel
   out of six and no interrupt channel.
-- **D6 (SCK), D9 (CS) and D10 (SO)** for the MAX6675. D9 and D10 are the
-  last two header pins that raise no interrupt, so they go first. The
-  third line has to cost something, and D6 is the cheapest of what is
-  left: its channel (IRQ4) is shared with D11, so spending D6 leaves IRQ4
-  still reachable there and loses no channel at all.
 - **D3 (IRQ0) and D8 (IRQ9) are deliberately left free.** They are the
   only two interrupt-capable pins whose channel collides with nothing, so
-  they are the obvious home for a second flow meter later. **A2 (IRQ7)**
-  is the third such pin and stays free too.
-
-D10 is also the hardware-SPI chip select, but nothing here uses the SPI
-peripheral and a chip select is only ever a plain GPIO — **D11, D12 and
-D13 stay free**, so a real SPI device can still be added later with its CS
-on any spare pin. What is left over after all of the above is D3, D8, D11,
-D12 and A0-A5, plus D0/D1 if you are willing to give up the serial log.
+  they are the obvious home for a second flow meter later.
 
 Note that `BaseStation.ino` uses D5 for a switch and D7 for a relay — now
 the DHT22 and a display pin. Those are separate boards today, but if you
@@ -117,30 +98,6 @@ The DATA line is open-drain and **needs a 10 kΩ pull-up to VCC**. Three-pin
 AM2302 breakout boards (`+` / `OUT` / `-`) have one fitted; a bare 4-pin
 DHT22 does not. Keep it out of the spray — the part is not sealed, and a
 wet element reads 100% humidity for hours.
-
-### MAX6675 thermocouple amplifier
-
-| MAX6675 module pin | UNO R4 WiFi pin |
-|--------------------|-----------------|
-| VCC                | **5V**          |
-| GND                | GND             |
-| SCK                | **D6**          |
-| CS                 | **D9**          |
-| SO (sometimes `DO`) | **D10**     |
-
-The MAX6675 runs on anything from 3.0 V to 5.5 V and its `SO` output
-swings to its own supply, so on this board feed it **5 V** and the logic
-levels line up with the header pins exactly. No pull-ups, no resistors,
-no level shifting.
-
-It is read-only SPI — there is no MOSI — and the library bit-bangs all
-three lines, which is why they sit on ordinary GPIOs rather than on the
-board's SPI pins.
-
-The thermocouple itself goes into the module's screw terminals, and
-**polarity matters**: `+` takes the yellow lead on ANSI-coded type K wire,
-or green on IEC-coded wire; `-` takes red (ANSI) or white (IEC). Wired
-backwards it still reads, but the number *falls* as the probe heats up.
 
 ### TM1637 display
 
@@ -172,10 +129,6 @@ Install via the Arduino Library Manager:
 - **ArduinoOTA** (Juraj Andrassy) — over-the-air sketch upload
 - **DHT sensor library** (Adafruit) — DHT22 driver, which pulls in
   **Adafruit Unified Sensor** as a dependency
-- **MAX6675 library** (Adafruit) — thermocouple amplifier driver, the same
-  one [CompostHeat](../CompostHeat) uses. It declares **LiquidCrystal** as
-  a dependency, which the Library Manager installs alongside it; nothing
-  in this sketch includes it
 
 **WiFiS3** and **Arduino_LED_Matrix** are both bundled with the UNO R4
 board package — do not install either separately. The flow sensor needs no
@@ -221,74 +174,10 @@ straight scale factor, so one measured run trims it out:
 Both the rate and the total derive from this one constant, so they stay
 consistent.
 
-## Thermocouple probe
-
-The MAX6675 channel is deliberately unopinionated about what it is
-measuring — it is a K-type probe on a station that already has air
-temperature, published as `PROBE_C` and shown on the display as `P`. Clip
-it to the water line, to a solar coil feeding the tank, or into a compost
-pile beside the tap; the sketch does not care, and nothing about it is
-specific to water.
-
-To relabel it for a fixed job, change `PROBE_topic` and
-`PROBE_FAULT_topic` in the sketch, and the `SEG_UNIT_P` glyph if a
-different letter reads better — the 7-segment alphabet that survives four
-digits is roughly `A b C d E F H L n o P r t U`.
-
-### What it can and cannot read
-
-| Property | Figure |
-|----------|--------|
-| Range | **0 to +1024 °C** |
-| Resolution | 0.25 °C (12-bit) |
-| Accuracy | ±8 LSB, so about **±2 °C** from 0 to +700 °C — *plus* the thermocouple's own tolerance, which for class-1 type K wire is another ±1.5 °C |
-| Read cadence | every 1 s (`probeInterval`), published every 10 s |
-
-**It cannot read below 0 °C at all.** The MAX6675's output word is
-unsigned, so there is no frost reading here and no negative number to
-alarm on — a probe below freezing reads 0 °C. If you want frost detection
-on a water line, the pin-compatible **MAX31855** does negatives (and
-reports short-to-VCC and short-to-GND faults besides), or use the DHT22's
-air temperature, which goes to -40 °C.
-
-Be honest about the accuracy too, because K-type is the wrong tool for
-lukewarm water: a couple of degrees of amplifier error plus a degree and a
-half of wire tolerance is fine on a compost pile at 65 °C and poor on a
-pipe at 12 °C. **A DS18B20 is more accurate below 100 °C, and cheaper.**
-The MAX6675 earns its place when the probe might see real heat, or when
-you already own the part — which, this repo having a
-[CompostHeat](../CompostHeat) station, is the case here.
-
-### Cold-junction compensation
-
-The MAX6675 compensates using its **own die temperature**, so the chip is
-one half of the measurement. Mount the breakout somewhere with stable,
-ordinary ambient — inside the enclosure, not bolted to a hot pipe and not
-in direct sun — and let only the probe see the interesting temperature. A
-module warming in the afternoon sun skews every reading taken while it
-does.
-
-### Faults
-
-`readCelsius()` returns `NAN` when the amplifier reports an open circuit,
-which covers an unplugged probe, a broken thermocouple and a floating `SO`
-line. One bad word is kept quiet and the previous reading held, exactly as
-with the DHT22; after **three consecutive failures**
-(`probeFailuresBeforeStale`) the reading is declared stale, `PROBE_C`
-stops being published, the display page shows ` --P` and
-`PROBE_FAULT` goes to `1`.
-
-Unlike the DHT22, the read is cheap and safe: 16 bits of bit-banging at
-10 µs a half-cycle is about **0.35 ms of CPU**, with interrupts enabled
-throughout, so it can never merge a flow pulse the way the DHT22's
-interrupt-masked exchange can. The 1 s cadence is set by the part's ~220 ms
-conversion time, not by any cost to the meter.
-
 ## MQTT Topics
 
-**The flow topics are the same as the Nano 33 IoT build's**, so this board
-is a drop-in replacement and existing dashboards keep working. The sensors
-the Nano does not have publish alongside them:
+**Same topics as the Nano 33 IoT build**, so this board is a drop-in
+replacement and existing dashboards keep working:
 
 | Topic                        | Payload                          | Frequency |
 |-------------------------------|-----------------------------------|-----------|
@@ -298,14 +187,11 @@ the Nano does not have publish alongside them:
 | `MUTHUR/NDATA/FLOW/HOURLY_L` | Litres drawn in the hour that just closed (float, 3dp) | 1h |
 | `MUTHUR/NDATA/FLOW/TEMP_C`   | Air temperature at the tap, °C (float, 1dp) | 10s |
 | `MUTHUR/NDATA/FLOW/HUMIDITY_PCT` | Relative humidity at the tap, % (float, 1dp) | 10s |
-| `MUTHUR/NDATA/FLOW/PROBE_C`  | Thermocouple temperature, °C (float, 2dp) | 10s |
-| `MUTHUR/DIAG/FLOW/PROBE_FAULT` | `1` when there is no current probe reading, `0` when there is | 10s |
-| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, pulses, temp_c, humidity_pct, climate_fails, probe_c, probe_fails}` | 30s |
+| `MUTHUR/DIAG/FLOW/STATUS`    | JSON: `{device, rssi, uptime, rate_lpm, total_l, hour_l, last_hour_l, pulses, temp_c, humidity_pct, climate_fails}` | 30s |
 | `MUTHUR/DIAG/FLOW/HB`        | Heartbeat counter                | 10s       |
 
-`TEMP_C`, `HUMIDITY_PCT`, `PROBE_C` and `PROBE_FAULT` have no counterpart
-on the Nano build, which simply never publishes them — the flow topics stay
-a drop-in either way.
+`TEMP_C` and `HUMIDITY_PCT` have no counterpart on the Nano build, which
+simply never publishes them — the flow topics stay a drop-in either way.
 They are read every 10s and published only when the read succeeds; after
 three consecutive failures they stop being published rather than repeat a
 stale value, and the JSON fields go to `null` with `climate_fails`
@@ -313,12 +199,6 @@ counting the run. Note the DHT22's bit-banged protocol masks interrupts
 for ~5ms per read, so at sustained flow above ~27 L/min a pulse can be
 merged — under 0.05% at the sensor's 30 L/min ceiling, against its own
 ±10% accuracy. Raise `climateInterval` if that matters.
-
-`PROBE_C` follows the same publish-only-when-fresh rule, with `probe_c`
-and `probe_fails` in the JSON. Because a missing reading there is more
-often a real fault than a dropped frame, `PROBE_FAULT` says so outright,
-so a dashboard can tell a dead probe from a dead broker. Its read costs
-the meter nothing — see [Thermocouple probe](#thermocouple-probe).
 
 `device` in the status JSON reads `Arduino UNO R4 WiFi`, so you can tell
 the two boards apart on the wire. **If you ever run both meters at once,
@@ -348,20 +228,14 @@ this is the one the R4 can actually fix.
 
 ## Display
 
-The TM1637 rotates through four pages, **four seconds each**, so the full
-cycle is sixteen seconds:
+The TM1637 rotates through three pages, **five seconds each**, so the full
+cycle is fifteen seconds:
 
 | Page | Shown | Meaning |
 |------|-------|---------|
 | Flow rate | `  8L` | 8 L/min |
-| Air temperature | ` 21C` | 21 °C at the tap |
+| Temperature | ` 21C` | 21 °C |
 | Humidity | ` 55H` | 55 %RH |
-| Probe | ` 64P` | 64 °C at the thermocouple |
-
-The dwell was five seconds while there were three pages. The probe made a
-fourth, and four times five is twenty seconds of waiting for the flow rate
-to come round again — which is the one thing this readout must not do, so
-the dwell came down instead and the whole rotation stayed put.
 
 **The rightmost digit is a unit tag, not a value.** This is what makes the
 rotation readable: the module has no decimal point, and its one piece of
@@ -371,13 +245,11 @@ and three pages of bare numbers is exactly the ambiguity that got an
 earlier two-page rotation removed. Spending the last digit on a letter
 buys back the labelling the hardware cannot otherwise do.
 
-That leaves three digits for the value, which is enough for almost
-everything this station measures — `-40C` to ` 80C` across the DHT22's
-range, and `100H` at saturation. The probe is the one exception: it reads
-to 1024 °C, so anything above 999 °C shows as `999P` and the real figure
-is on `PROBE_C`. Values are rounded to whole units, and anything wider
-than three digits is clamped rather than wrapped: a display pinned at
-`999L` is visibly pinned, whereas a wrapped number looks like a real
+That leaves three digits for the value, which is enough for everything
+this station measures — `-40C` to ` 80C` across the DHT22's range, and
+`100H` at saturation. Values are rounded to whole units, and anything
+wider than three digits is clamped rather than wrapped: a display pinned
+at `999L` is visibly pinned, whereas a wrapped number looks like a real
 reading.
 
 | Shown | Meaning |
@@ -385,8 +257,6 @@ reading.
 | `  0L` | No flow |
 | ` --L` | No sample yet — the first second after boot |
 | ` --C` / ` --H` | The DHT22 has not answered for three reads running |
-| ` --P` | Open circuit — no thermocouple, or a broken one |
-| `  0P` | A real reading: the MAX6675 cannot go below 0 °C, and a dead `SO` line also lands here |
 
 A page with no reading still shows its unit letter, so the display says
 which value is missing rather than going blank.
@@ -616,10 +486,9 @@ accumulated from `HOURLY_L`. Persisting them across reboots is in
 ## Build
 
 1. In the Arduino IDE, select **Board: Arduino UNO R4 WiFi**.
-2. Install PubSubClient, TM1637, ArduinoOTA, the DHT sensor library and
-   the MAX6675 library.
+2. Install PubSubClient, TM1637, ArduinoOTA and the DHT sensor library.
 3. Create `arduino_secrets.h` as described in Configuration.
-4. Wire the YF-S201, DHT22, MAX6675 and TM1637 per the tables above.
+4. Wire the YF-S201, DHT22 and TM1637 per the tables above.
 5. Upload `FlowSenseR4.ino`.
 6. Open the Serial Monitor at 9600 baud.
 
@@ -644,8 +513,7 @@ The same by hand:
 arduino-cli core update-index
 arduino-cli core install arduino:renesas_uno
 arduino-cli lib install "PubSubClient" "TM1637" "ArduinoOTA" \
-                       "DHT sensor library" "Adafruit Unified Sensor" \
-                       "MAX6675 library"
+                       "DHT sensor library" "Adafruit Unified Sensor"
 
 cp Arduino/FlowSenseR4/arduino_secrets.h.example Arduino/FlowSenseR4/arduino_secrets.h
 $EDITOR Arduino/FlowSenseR4/arduino_secrets.h
@@ -674,11 +542,11 @@ hourly matrix above is the first of them.
 The measurement core — the ISR, the rate maths and the hourly bucket — is
 still byte-for-byte identical between the two sketches, and the R4 build
 only adds to it (a `matrixSetCurrentHour()` call at the end of the sample
-window, a `matrixRollHour()` call when an hour closes, `readClimate()` and
-`readProbe()` on their own ticks, and the matrix helpers).
+window, a `matrixRollHour()` call when an hour closes, `readClimate()` on
+its own tick, and the matrix helpers).
 
 **The TM1637 logic is the one part that has genuinely diverged.** The Nano
-build still shows a single page of flow rate; this one rotates four and
+build still shows a single page of flow rate; this one rotates three and
 carries the unit glyphs and layout helper that go with it. There is
 nothing to port back — the Nano has no climate sensor to page to — so the
 two display blocks are now expected to differ rather than to match.
@@ -706,12 +574,6 @@ order of usefulness for a water meter. None of these are implemented yet.
   persisting alongside it, so a reboot does not blank the day's history.
 - **More from the LED matrix.** The hourly bars use it already; a
   leak-alert glyph or a live-rate view could share it as a second page.
-- **A negative-capable probe.** The MAX6675 stops at 0 °C, so the one
-  thing a water line most wants to alarm on — freezing — is the one thing
-  it cannot see. The **MAX31855** is a drop-in on the same three pins and
-  reads down to -270 °C, with explicit short-to-VCC and short-to-GND
-  faults on top of the open-circuit bit. `readProbe()` is the only
-  function that would change.
 - **Leak detection.** Continuous non-zero flow for longer than some
   threshold is a burst pipe or a stuck valve. Wants persistent state and a
   retained MQTT alert topic.
@@ -759,48 +621,6 @@ Usually plumbing rather than electronics: an elbow or valve immediately
 upstream puts swirl into the flow and the turbine over-reads. Failing
 that, run the calibration above.
 
-### The probe shows ` --P`, and `PROBE_FAULT` is `1`
-
-An open circuit, which is what the MAX6675 reports when there is no
-thermocouple across its terminals. Check the screw terminals are tight on
-bare wire and not on insulation, that the thermocouple's weld at the tip is
-intact, and that `SO` is actually landed on **D10** — a floating `SO` line
-reads as all ones, which sets the same open-circuit bit.
-
-### The probe reads 0.00 °C and never moves
-
-Two possibilities, and they look identical on the wire:
-
-- `SO` is stuck low — not connected, or shorted to ground. Every bit
-  clocks in as zero, which is a valid word reading exactly 0 °C rather
-  than a fault.
-- The probe really is at or below 0 °C. The MAX6675's output is unsigned
-  and **cannot represent a negative temperature**, so anything below
-  freezing reads 0 °C. See [Thermocouple probe](#thermocouple-probe).
-
-Warm the tip in your hand: a good channel moves within a second or two.
-
-### The probe reading falls as the tip heats up
-
-The thermocouple is in backwards. Swap the two leads in the screw
-terminals — `+` is yellow on ANSI-coded type K wire, green on IEC-coded.
-
-### The probe reading wanders or jumps by tens of degrees
-
-Thermocouple wire is a millivolt-level source and the MAX6675 is a
-high-impedance amplifier, so this is usually pickup:
-
-- Keep the thermocouple run away from the pump's mains lead — the same
-  advice as for the flow signal, and more important here.
-- Keep the MAX6675 module's ground tied to the board's, and its supply on
-  the 5V rail rather than at the end of a long thin lead.
-- If the probe tip is electrically bonded to something live-ish (a pump
-  housing, a grounded tank), a grounded-junction probe couples that in;
-  an ungrounded/insulated-junction probe fixes it.
-- A reading that only wanders in the afternoon is cold-junction drift, not
-  noise: the module is in the sun. See
-  [Cold-junction compensation](#cold-junction-compensation).
-
 ### The port appears but nothing prints
 
 Like the Nano 33 IoT, the R4's serial port is native USB (CDC) provided by
@@ -831,9 +651,3 @@ frozen LED points at a crash rather than a network problem.
 - Volume is held as an integer pulse count and converted to litres only at
   the point of use, so repeatedly adding small floats never erodes the
   total.
-- The MAX6675 library sets its three pin modes in its **constructor**,
-  which on this core runs from `__libc_init_array` before the board's
-  `init()` has touched the port registers — so those calls quietly do
-  nothing. `setup()` re-applies them, which is why `pinMode(MAXCLK, …)`
-  and friends appear there as well as in the library. The same is true of
-  [CompostHeat](../CompostHeat), which re-applies CS for the same reason.
